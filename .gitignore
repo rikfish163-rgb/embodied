@@ -1,0 +1,14 @@
+venv/
+cache/
+hf/
+runs/
+data/*.hdf5
+data/*.h5
+figs/*.png
+figs/*.mp4
+results/*.jsonl
+__pycache__/
+*.pyc
+.pytest_cache/
+menagerie/
+.omx/
