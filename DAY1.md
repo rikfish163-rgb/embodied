@@ -70,12 +70,20 @@ DAY1_REPORT.md
 source /media/hetaisheng/044A81D94A81C83E/embodied/env.sh
 export PYTHONPYCACHEPREFIX="$EMB/cache/pycache"
 cd "$EMB/src"
+test -f "$MENAGERIE/franka_emika_panda/scene.xml"
+test -f "$MENAGERIE/franka_emika_panda/LICENSE"
+grep '^repository=https://github.com/google-deepmind/mujoco_menagerie$' \
+  "$MENAGERIE/VENDORED_REVISION"
+grep '^revision=da76818e269b82289eba39808e2fb91d679d6994$' \
+  "$MENAGERIE/VENDORED_REVISION"
 python -V
 python -c 'import numpy, scipy, mujoco; print(numpy.__version__, scipy.__version__, mujoco.__version__)'
 python -m pytest -p no:cacheprovider robotics/tests/test_so3.py -q
 ~~~
 
-预期基线是 **24 failed**；当前 so3.py 是 TODO 骨架，失败原因应当都是或主要都是 `NotImplementedError("TODO(you)")`。这是基线成功，不是环境失败。
+Menagerie 四项预期是：模型和许可证存在、来源匹配 `google-deepmind/mujoco_menagerie`、revision 完整匹配锁定值。它现在由主仓库统一管理，但仍是第三方判卷模型，不要直接修改；本项目的 TCP 和相机由 `src/env/scene.py` 在内存中注入。
+
+SO(3) 预期基线是 **24 failed**；当前 so3.py 是 TODO 骨架，失败原因应当都是或主要都是 `NotImplementedError("TODO(you)")`。这是基线成功，不是环境失败。
 
 如果出现 `ModuleNotFoundError`、MuJoCo XML/asset 错误或 Python 解释器不在 `$EMB/venv`，先修环境，不进入编码。确认：
 

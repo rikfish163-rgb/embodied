@@ -7,6 +7,9 @@
 > **目标岗位**：千寻智能 / 智元 / 星海图 一档的「VLA操作算法 / 数据算法 / 模型评测」
 > **约束**：纯仿真（无真机）· RTX 5070 Laptop **8GB** · 一周 · 每天 13h+
 > **开工**：2026-08-18
+>
+> **文档层级**：招聘依据与项目选择见 `docs/EMBODIED_ARM_CAREER_7DAY_PLAN_2026.md`；
+> 本文件是七天技术规格；Day 1 的实际执行只看 `DAY1.md`；统一入口见 `README.md`。
 
 ---
 
@@ -14,13 +17,13 @@
 
 | 项 | 值 | 影响 |
 |---|---|---|
-| 项目根 | `/media/hetaisheng/044A81D94A81C83E/embodied` | 数据盘 NVMe，ntfs3；2026-08-19 实测系统盘仅余约 1.2G |
+| 项目根 | `/media/hetaisheng/044A81D94A81C83E/embodied` | 数据盘 NVMe，ntfs3；2026-08-19 23:45 实测系统盘仅余约 979 MiB |
 | 弃用磁盘 | `sda1` (USB, 29G) | ext4 块位图损坏，只写过 4MB 就坏 → **设备本身有问题，别再用** |
 | GPU | RTX 5070 Laptop, **8151 MiB**, sm_120 (Blackwell) | 驱动 580.173；torch 必须 CUDA 12.8+ 构建 |
 | torch | 2.13.0 + CUDA 13 | PyPI 默认构建已含 sm_120 |
 | MuJoCo | 3.11.0 | 有 `MjSpec`（程序化改模型），有 `mj_jacSite`（Day2 判卷器） |
 | 渲染 | EGL，**1501 fps/相机** | 400 ep × 80 步 × 双相机 ≈ **43 秒** |
-| RAM | 30G（2026-08-19 可用约 8.9G），swap 15G（已用约 11G） | ⚠️ 训练前必须关 Chrome/微信/VSCode 等重进程，先运行 `free -h` |
+| RAM | 30G；swap 15G（2026-08-19 23:45 已用约 13G） | ⚠️ 可用内存是动态值；训练前先运行 `free -h`，只关闭不需要的重进程 |
 | 网络 | `raw.githubusercontent` 被墙；`pypi.tuna` 5MB/s；GitHub API 通 | 装包走清华源，拉 GitHub 文件走 `gh api` |
 
 ### Day 0 测出的四个数（Day1-3 会直接用）
@@ -39,6 +42,15 @@
 ```bash
 source /media/hetaisheng/044A81D94A81C83E/embodied/env.sh
 ```
+
+### Menagerie 第三方快照边界
+
+- 来源：Google DeepMind `mujoco_menagerie`，当前锁定 `da76818e269b82289eba39808e2fb91d679d6994`；
+- 主仓库只 vendoring `franka_emika_panda` 及上游来源说明，Panda 子目录许可证为 Apache-2.0；
+- `menagerie/` 内没有第二个 `.git`，由主仓库统一管理，新 clone 会直接包含模型；
+- revision 记录在 `menagerie/VENDORED_REVISION`，升级时必须审查模型差异并重跑基线；
+- 不直接修改上游 XML/mesh；TCP/相机由 `src/env/scene.py` 注入，工作台、物体和容器由 `src/env/pick_place.py` 注入；
+- Day 1 的 MuJoCo 对照是独立判卷器，不能把 `data.site_xpos/site_xmat` 偷渡进自写 FK。
 
 ---
 
@@ -289,7 +301,7 @@ embodied/
 ├── PLAN.md  README.md  REPORT.md  LOGBOOK.md
 ├── PROTOCOL.md                # ★ 采集协议
 ├── EVAL_PROTOCOL.md           # ★ 评测协议
-├── menagerie/                 # Panda 模型 (67 mesh, 已就位)
+├── menagerie/                 # 主仓库管理的官方 Panda 快照，revision 见锁定文件
 ├── src/
 │   ├── robotics/              # ★★ Day1-2 你的手写代码
 │   │   ├── so3.py             #    ✅ 骨架就位, 24 测试待绿

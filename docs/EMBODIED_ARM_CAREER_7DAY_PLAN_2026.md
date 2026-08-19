@@ -5,6 +5,17 @@
 > 定制假设：按此前背景“985 AI 本科、低年级、项目积累较少”设计；毕业年份仍需在实际投递前逐岗核对。  
 > 证据边界：招聘官网和当前职位页用于判断岗位方向；第三方招聘页只作为技能信号，不等于岗位仍开放。
 
+## 文档关系与执行入口
+
+这不是一套独立于仓库的第二方案，而是当前项目的“岗位依据 + 总路线”层：
+
+- 本文回答为什么选择 Panda、运动学、Mini-ACT 和鲁棒评测，以及它们对应哪些岗位；
+- 根目录 [`PLAN.md`](../PLAN.md) 是统一技术规格，负责七天工程门禁和系统边界；
+- 根目录 [`DAY1.md`](../DAY1.md) 是 Day 1 唯一执行清单，分钟级命令和验收以它为准；
+- 根目录 [`README.md`](../README.md) 是仓库入口，并记录 vendored Menagerie 的来源、锁定 revision 和升级方法。
+
+`docs/jobs/` 当前为空，只是未来招聘证据快照的预留位置；空目录和本文中的第三方链接都不能单独证明岗位仍开放。实际投递当天必须重开官方页面，核对毕业年份、地点、实习时长和岗位状态。
+
 ---
 
 ## 0. 先给结论
@@ -34,12 +45,12 @@
 | 项目 | 2026-08-19 实测 | 对计划的影响 |
 |---|---:|---|
 | CPU | Ryzen 9 7845HX，12 核 24 线程 | 适合 MuJoCo 并行采样、离线数据检查 |
-| 内存 | 30 GiB，总可用约 8.9 GiB | HDF5 流式读取；`num_workers=1~2`，不把图像全集载入 RAM |
-| Swap | 15 GiB，已用约 11 GiB | 训练前关闭浏览器、IDE、微信等重进程；先看 `free -h` |
+| 内存 | 30 GiB；可用量是动态值，开工前重新执行 `free -h` | HDF5 流式读取；`num_workers=1~2`，不把图像全集载入 RAM |
+| Swap | 15 GiB；2026-08-19 23:45 已用约 13 GiB | 当前内存压力偏高；训练前关闭不需要的重进程并重新检查 |
 | GPU | RTX 5070 Laptop，8151 MiB，sm_120 | Mini-ACT / ResNet18 / 小 Transformer 可行；不本地全参训练大 VLA |
 | PyTorch | 2.13.0+cu130；CUDA 可用；BF16 支持 | 使用 BF16 autocast；每次先跑显存 smoke test |
 | 数据盘 | 626 GiB，总空闲约 42 GiB | 数据、缓存、checkpoint 全放 `$EMB`；单项目预算不超过 25 GiB |
-| 系统盘 | 98 GiB，仅约 1.2 GiB 空闲 | 禁止把 Hugging Face、Torch、uv 缓存写到 `~/.cache` |
+| 系统盘 | 98 GiB；2026-08-19 23:45 仅约 979 MiB 空闲 | 禁止把 Hugging Face、Torch、uv 缓存写到 `~/.cache` |
 | 当前工具 | Docker/Conda/Python 可用；shell 找不到 ROS 2、Gazebo、`nvcc` | 本周不临时安装大型 ROS/Isaac 栈；先用现成 MuJoCo 环境闭环 |
 
 ### 为什么本周不装 Isaac Lab
@@ -491,8 +502,10 @@ MoveIt 学习入口：
 
 ## 10. 当前仓库状态（2026-08-19）
 
-- Git `main` 工作树在本轮改文档前为干净状态；最新提交为环境与 Panda 场景迁移。
+- 本次整合审计的 Git 起点是 `main` 提交 `e19d84c`（`day1`）；本轮文档整合尚未自动提交。
 - `env.sh` 已把 uv/HF/Torch 缓存路由到数据盘。
+- `menagerie/` 是由主仓库直接管理的 Google DeepMind Panda 第三方快照；内层 Git 已移除，来源 revision 锁定为 `da76818e269b82289eba39808e2fb91d679d6994`。
+- Panda 的上游 XML/mesh 不直接修改；TCP 与双相机由 `src/env/scene.py` 使用 `MjSpec` 在内存中注入。
 - MuJoCo Panda 场景实测可构建：`nq=30`、`nu=8`，双相机渲染成功。
 - PyTorch 能识别 RTX 5070 Laptop，计算能力 `(12,0)`，BF16 可用。
 - `so3.py` 仍是 5 个 `TODO`；24 个测试当前全部按预期失败于 `NotImplementedError`。

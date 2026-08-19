@@ -1,0 +1,4 @@
+repository=https://github.com/google-deepmind/mujoco_menagerie
+revision=da76818e269b82289eba39808e2fb91d679d6994
+vendored_path=franka_emika_panda
+license=Apache-2.0
