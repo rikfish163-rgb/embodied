@@ -1,4 +1,4 @@
-# panda-week 完整计划
+# embodied Panda 全链路项目完整计划
 
 > **项目定位**：一周承重墙 + 可扩展底座。
 > 目标不是漂亮 demo，是四个你能在面试里讲透四十分钟的东西：
@@ -14,13 +14,13 @@
 
 | 项 | 值 | 影响 |
 |---|---|---|
-| 项目根 | `/media/hetaisheng/044A81D94A81C83E/panda-week` | 600G NVMe，ntfs3，**系统盘未动**（根盘只剩 1.6G） |
+| 项目根 | `/media/hetaisheng/044A81D94A81C83E/embodied` | 数据盘 NVMe，ntfs3；2026-08-19 实测系统盘仅余约 1.2G |
 | 弃用磁盘 | `sda1` (USB, 29G) | ext4 块位图损坏，只写过 4MB 就坏 → **设备本身有问题，别再用** |
 | GPU | RTX 5070 Laptop, **8151 MiB**, sm_120 (Blackwell) | 驱动 580.173；torch 必须 CUDA 12.8+ 构建 |
 | torch | 2.13.0 + CUDA 13 | PyPI 默认构建已含 sm_120 |
 | MuJoCo | 3.11.0 | 有 `MjSpec`（程序化改模型），有 `mj_jacSite`（Day2 判卷器） |
 | 渲染 | EGL，**1501 fps/相机** | 400 ep × 80 步 × 双相机 ≈ **43 秒** |
-| RAM | 30G（已用 24G），**swap 15G 全满** | ⚠️ 训练前必须关 Chrome/微信/VSCode，否则 oomd 杀进程 |
+| RAM | 30G（2026-08-19 可用约 8.9G），swap 15G（已用约 11G） | ⚠️ 训练前必须关 Chrome/微信/VSCode 等重进程，先运行 `free -h` |
 | 网络 | `raw.githubusercontent` 被墙；`pypi.tuna` 5MB/s；GitHub API 通 | 装包走清华源，拉 GitHub 文件走 `gh api` |
 
 ### Day 0 测出的四个数（Day1-3 会直接用）
@@ -37,7 +37,7 @@
 ### 每次开工
 
 ```bash
-source /media/hetaisheng/044A81D94A81C83E/panda-week/env.sh
+source /media/hetaisheng/044A81D94A81C83E/embodied/env.sh
 ```
 
 ---
@@ -146,7 +146,7 @@ source /media/hetaisheng/044A81D94A81C83E/panda-week/env.sh
 | `obs/qvel` | 7 关节速度 |
 | `obs/gripper` | 夹爪开合（归一化到 [0,1]，注意 ctrl 是 0–255） |
 | `obs/ee_pose` | 末端 SE(3) —— **用你的 FK 算，不读 MuJoCo** |
-| `action` | 目标关节角（绝对量），H 步一组 |
+| `action` | `[arm_target(7), gripper_cmd(1)]`，共 8 维绝对目标，H 步一组；夹爪命令归一化到 `[0,1]`，在环境边界再映射到 `ctrl[7]∈[0,255]` |
 | `lang` | 指令字符串 |
 | `meta` | 随机化参数、成功标志、episode 长度、seed |
 
@@ -166,7 +166,7 @@ source /media/hetaisheng/044A81D94A81C83E/panda-week/env.sh
 先把"chunk 是什么、怎么执行、时间轴怎么对齐"跑通。**这一步就能闭环。**
 
 ```
-ResNet18(两路相机共享权重) + qpos → concat → MLP → 输出 H×7 动作块
+ResNet18(两路相机共享权重) + proprio(qpos+gripper) → concat → MLP → 输出 H×8 动作块
 loss: L1
 ```
 
@@ -187,7 +187,7 @@ loss: L1
 
 ```
 图像 token + proprio token → Transformer encoder(d=256, 4层, nhead=8)
-                            → H 个 learned action query → decoder → H×7
+                            → H 个 learned action query → decoder → H×8
 ```
 
 **明确跳过 CVAE**（原 ACT 的 style variable）。理由写进报告：
@@ -196,8 +196,18 @@ CVAE 是为建模人类演示的多模态性；**脚本专家是单模态的，C
 
 **验收**：成功率超过 Stage A
 
-**Day 5 收尾必做**：挂上 12 组消融（H ∈ {8,16,32,64} × 3 seeds），睡觉时跑。
-预估单次训练 ~18-20 min（*估计值，Day 4 实测后修正*），12 组约 3.5-4h。
+**先把两个量分开**：
+
+- `H_pred`：策略一次预测多少步；
+- `K_exec`：闭环重新观测前实际执行多少步，且 `K_exec ≤ H_pred`。
+
+**Day 5 收尾必做**：先训练一份 `H_pred=64` 的冻结 checkpoint，供 Day 6 只改变
+`K_exec ∈ {8,16,32,64}`。若资源与时间允许，再挂
+`H_pred ∈ {8,16,32,64} × 3 seeds`，且评测时固定 `K_exec=8`。
+若 `H_pred=64` 不收敛，就使用已收敛的最大 `H_pred`，并相应截断 `K_exec` 网格，
+不能为了保住预设图表而换用失败 checkpoint。
+
+单次训练耗时必须以 Day 4/5 的实测为准，不能把预估写成结果。
 
 > ⚠️ **Day 5 22:00 检查点**：Transformer 不收敛 → 用 Stage A 跑消融。
 > **消融不可砍，网络结构可降级。**
@@ -206,28 +216,35 @@ CVAE 是为建模人类演示的多模态性；**脚本专家是单模态的，C
 
 ### Day 6（13h）：这一天决定项目值多少钱
 
-#### 6.1 H 消融曲线（带误差棒）
+#### 6.1 预测长度与执行长度的受控消融（带误差棒）
 
-控制频率 20Hz → **open-loop 时长 = H / 20 秒**。这个换算是解释拐点的钥匙：
+控制频率 20Hz 时，真正的 **open-loop 时长 = `K_exec / 20` 秒**，不是自动等于
+`H_pred / 20`。只有整块执行（`K_exec=H_pred`）时两者才相等。
 
-| H | open-loop 时长 | 预期现象 |
+主实验固定同一个 `H_pred=64` checkpoint，只改变 `K_exec`：
+
+| K_exec | open-loop 时长 | 预期现象 |
 |---|---|---|
 | 8 | 0.4s | 推理调用频繁，latency 占比高 |
 | 16 | 0.8s | 通常最优区 |
 | 32 | 1.6s | 平滑但反应变钝 |
 | 64 | 3.2s | 扰动后基本救不回来 |
 
-12 组 × 50 trials（L0）→ 成功率 + Wilson 95% 区间。预估 30-40 min。
+这样恢复率变化可以归因于重规划频率，而不是同时换了模型输出头。若夜间训练完成，
+再做次实验：固定 `K_exec=8`，比较 `H_pred∈{8,16,32,64}`，隔离预测长度本身的影响。
+所有组各 50 trials，报告成功率 + Wilson 95% 区间；运行时间以实测为准。
 
-#### 6.2 ★ 杀手实验：执行中途扰动物体，测恢复率 vs H
+#### 6.2 ★ 杀手实验：执行中途扰动物体，测恢复率 vs K_exec
 
-策略执行到一半时把立方体挪 3cm，记录恢复率。
-**预期：恢复率随 H 单调下降，且在「剩余 open-loop 时长 > 扰动后可用反应时间」时崩塌。**
+在固定 seed、固定任务阶段且立方体尚未被夹持时，把立方体横向挪 3cm，记录恢复率；
+不要在夹爪已接触/夹持时瞬移物体，以免把不物理的穿透冲量混进实验。
+**预期：恢复率随 `K_exec` 增大而下降，且在「剩余 open-loop 时长 > 扰动后可用反应时间」时崩塌。**
 
 极少有学生做这个实验，但它是"为什么 chunk 不能太长"的**直接实验证据**。
-面试官问 "H 为什么选 16 不选 64"，你的答案不是"论文这么写"，而是一张恢复率曲线。
+面试官问“为什么不整块执行 64 步”，你的答案不是“论文这么写”，而是同一 checkpoint、
+只改变 `K_exec` 的恢复率曲线。若被问 `H_pred`，再展示固定 `K_exec` 的次实验，避免混淆。
 
-4 个 H × 50 trials，预估 15 min。
+4 个 `K_exec` × 50 trials；运行时间、触发时刻与有效 trial 数全部按实测记录。
 
 #### 6.3 eval 协议（最优 H × 6 档 × 50 trials）
 
@@ -267,7 +284,7 @@ L5 指令改写   "red" → "crimson"（★ 仅在做了三色升级时才测）
 ## 3. 仓库结构
 
 ```
-panda-week/
+embodied/
 ├── env.sh                     # source 我
 ├── PLAN.md  README.md  REPORT.md  LOGBOOK.md
 ├── PROTOCOL.md                # ★ 采集协议
@@ -310,14 +327,14 @@ panda-week/
 
 **单变量原则**：一次只动一列。
 
-| exp_id | policy | n_demo | H | seed | 视角 | 成功率(L0) | 95%CI | 主要失败模式 | 推理延迟(ms) | 恢复率 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| B-h8-s0 | Trans | 400 | 8 | 0 | w+f | | | | | |
-| B-h16-s0 | Trans | 400 | 16 | 0 | w+f | | | | | |
-| B-h32-s0 | Trans | 400 | 32 | 0 | w+f | | | | | |
-| B-h64-s0 | Trans | 400 | 64 | 0 | w+f | | | | | |
-| …×3 seeds | | | | 0/1/2 | | | | | | |
-| A-h16-s0 | CNN+MLP | 400 | 16 | 0 | w+f | | | | | |
+| exp_id | policy | n_demo | H_pred | K_exec | seed | 视角 | 成功率(L0) | 95%CI | 主要失败模式 | 推理延迟(ms) | 恢复率 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| B-h64-k8-s0 | Trans | 400 | 64 | 8 | 0 | w+f | | | | | |
+| B-h64-k16-s0 | Trans | 400 | 64 | 16 | 0 | w+f | | | | | |
+| B-h64-k32-s0 | Trans | 400 | 64 | 32 | 0 | w+f | | | | | |
+| B-h64-k64-s0 | Trans | 400 | 64 | 64 | 0 | w+f | | | | | |
+| B-h16-k8-s0（次实验） | Trans | 400 | 16 | 8 | 0 | w+f | | | | | |
+| A-h16-k8-s0 | CNN+MLP | 400 | 16 | 8 | 0 | w+f | | | | | |
 
 **若时间允许再加的维度**（按价值排序）：数据量 `n_demo ∈ {100,200,400}` > 视角组合（仅腕部 / 仅第三人称 / 双路）> 失败样本混入比。
 
@@ -329,7 +346,7 @@ panda-week/
 |---|---|
 | Day 2 22:00 IK 不收敛 | 保留手写 FK+Jacobian，IK 换 `scipy.optimize`，砍零空间 |
 | Day 3 专家成功率 < 80% | 取消朝向约束，只做 top-down 抓取 |
-| Day 5 22:00 Transformer 不收敛 | 用 Stage A 跑消融（**消融不可砍**） |
+| Day 5 22:00 Transformer 不收敛 | 用 Stage A 固定 checkpoint 跑 `K_exec` 消融（**消融不可砍**） |
 | 任何一天落后 > 4h | 从交付物列表底部砍：视频 → 三色语言 → 零空间 → L4 档 |
 | 训练被 oomd 杀 | 关 Chrome/微信/VSCode；`num_workers` 降到 1；数据集减到 200 ep |
 | 显存 OOM | `bs` 16→8；图像 128→96；ResNet18→自定义小 CNN |
@@ -364,7 +381,7 @@ MuJoCo API 排查 · CUDA/依赖报错 · 可视化绘图 · 训练脚本样板 
 | VLA 微调的数据量一般是多少？ | Day 6 的 `n_demo` 消融曲线（若做了） |
 | 遥操作数据采集原理？ | Day 3 的脚本专家 + 为什么它替代了遥操、代价是什么 |
 | π0 / π0.5 / π\*0.6 的区别？ | 报告里的路线综述 + 你跳过 CVAE 的理由 |
-| H 为什么选 16 不选 64？ | **Day 6.2 的扰动恢复率曲线** |
+| `H_pred` 与 `K_exec` 有什么区别，为什么不整块执行 64 步？ | **Day 6.1/6.2 的受控消融与扰动恢复率曲线** |
 | Panda 的零空间你怎么用？ | Day 2 的关节限位越界次数对比 |
 | 手眼标定残差多少？ | 纯仿真无标定 → **诚实说明，改讲 FK 与 `mj_jacSite` 的 1e-9 验证** |
 | sim 成功率高真机低，你怎么归因？ | 报告的"方法学局限"章节（本项目未做真机，要明确边界） |
@@ -392,5 +409,7 @@ MuJoCo API 排查 · CUDA/依赖报错 · 可视化绘图 · 训练脚本样板 
 ## 9. 当前状态
 
 - ✅ Day 0 完成
-- 🔄 torch 2.13.0 解包中（不阻塞 Day 1，`so3.py` 是纯 NumPy）
+- ✅ torch 2.13.0+cu130 已可用；RTX 5070 Laptop、sm_120、BF16 已实测通过
+- ✅ MuJoCo Panda 任务场景可构建并完成双相机渲染
+- 🔄 `so3.py` 仍为 5 个 TODO；24 个测试按预期全部失败于 `NotImplementedError`
 - ⏭️ **下一步：`robotics/so3.py` 五个 TODO → `pytest robotics/tests/test_so3.py` 24 绿**
