@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      MUJOCO_GL: egl
+      MUJOCO_GL: osmesa
       PYTHONPYCACHEPREFIX: ${{ github.workspace }}/.cache/pycache
 
     steps:
@@ -27,6 +27,11 @@ jobs:
           version: 0.9.21
           python-version: "3.12"
           enable-cache: true
+
+      - name: Install headless MuJoCo renderer
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libosmesa6
 
       - name: Install foundation dependencies
         run: uv sync --locked --group test
