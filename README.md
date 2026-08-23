@@ -8,18 +8,21 @@
 
 ## 当前阶段与快速验证
 
-当前只完成 **M0 工程底座**：Panda 场景、确定性随机化、双相机观测、
-8 维动作接口、连续 1 秒成功判定、环境回归测试和 CI。M1 脚本专家尚未实现，
-因此仓库不会声称已经完成抓放任务。
+当前已通过 **M0 工程底座** 和 **M1 脚本专家**：Panda 场景、确定性随机化、
+双相机观测、8 维动作接口、连续 1 秒成功判定，以及基于 6D DLS IK 的物理抓放
+状态机。固定 seed 0–99 的验收结果为 99/100；M2 数据集尚未开始，因此仓库不会
+声称已经完成模仿学习或 ACT。
 
 干净环境使用 Python 3.12 和 [uv](https://docs.astral.sh/uv/)：
 
 ```bash
 git clone https://github.com/rikfish163-rgb/embodied.git
 cd embodied
-uv sync --locked --group test
+uv sync --locked --group test --group video
 MUJOCO_GL=egl uv run python scripts/check_foundation.py
 MUJOCO_GL=egl uv run pytest tests -q
+MUJOCO_GL=egl uv run python -m expert.evaluate \
+  --output-dir runs/m1/acceptance-001 --record failures
 ```
 
 本机已有 `venv/` 或 uv 创建的 `.venv/` 时，也可以：
@@ -54,7 +57,8 @@ MUJOCO_GL=glfw python -m env.native_viewer --seed 0 --debug-sites
 旧版手写练习，五个函数仍为 `TODO(you)`；它不属于 M0/M1 的通过条件，也没有被
 伪装成已经通过。
 
-`uv.lock` 是公开仓库 M0 底座的最小、跨机器安装契约；
+`uv.lock` 是公开仓库的跨机器安装契约；默认依赖仍保持最小，MP4 编码器位于
+独立的 `video` 依赖组。
 `requirements.lock.txt` 是本机包含 CUDA/PyTorch 的完整环境快照。CI 只安装前者，
 避免为了验证 MuJoCo 场景下载整套训练栈。
 
@@ -138,6 +142,26 @@ cube 必须完整进入盒子、落到底部附近，并在物理仿真中连续
 ### M1：脚本专家闭环
 
 做什么：用 MuJoCo 的 site Jacobian + 阻尼最小二乘控制器完成“上方接近 → 下降 → 合爪 → 抬升 → 移动 → 松爪”。这里使用引擎 Jacobian，不先手写整套运动学。
+
+**状态：已通过。** 2026-08-24 在固定 seed 0–99 上成功 99 次；其中 2 次运输
+滑落由一次物理重抓恢复，唯一失败为 seed 34 的第二次抬升抓取失败。完整结果、
+控制器参数和失败边界见 [M1 专家验收报告](docs/M1_EXPERT_REPORT.md)。
+
+控制链不是“调用一个黑盒 IK”：
+
+```text
+TCP 位置/姿态误差
+  → 统一到世界坐标系的 6D 任务增量 Δx
+  → MuJoCo mj_jacSite 得到 J=[J_position; J_rotation]
+  → Δq = Jᵀ(JJᵀ + λ²I)⁻¹Δx + 零空间回中项
+  → 限速、关节范围和 command lead 裁剪
+  → 8D action=[7 维关节目标, 1 维夹爪目标]
+  → PickPlace.step() 推进 20 Hz 控制与 500 Hz 物理
+```
+
+专家只在控制阶段读取 cube/box/TCP 真值；reset 之后不写 cube 位姿，不提高摩擦，
+也不绕过环境成功计数。批量评测会为每个 seed 写 success、failure stage、attempts
+和最终位姿；追加 `--record all` 可生成逐 seed 的前视+腕部 MP4。
 
 通过条件：
 
@@ -239,14 +263,18 @@ LeRobot 当前硬件指南给 ACT 类轻量 BC 的参考峰值是 batch 8 时约
 
 ## 现在只做什么
 
-当前只进入 **M1 脚本专家**。`src/robotics/so3.py` 暂时冻结，不要求先完成；现有 Panda、工作台、cube、box 和双相机场景全部复用。
+当前只进入 **M2 可审计数据集**。`src/robotics/so3.py` 继续冻结；M1 的控制动作与
+阶段标签将直接复用，但观测必须在动作执行前按 20 Hz 对齐写入，策略输入不能包含
+cube/box/TCP 真值。
 
 ```bash
 source ./env.sh
-MUJOCO_GL=glfw python -m env.native_viewer --seed 0
+MUJOCO_GL=egl python -m expert.evaluate \
+  --output-dir runs/m1/acceptance-001 --record failures
 ```
 
-基线命令通过后，下一次工作就是实现并验证 M1；在专家达到 90/100 之前，不创建训练模型、不采 200 条数据，也不继续刷更多课程。
+M2 下一步是先冻结 HDF5 schema、时间对齐和 train/val seed，再采集 200 条成功训练
+轨迹与 40 条成功验证轨迹。在回放 20 条至少成功 18 条之前，不创建训练模型。
 
 ## 第三方模型边界
 

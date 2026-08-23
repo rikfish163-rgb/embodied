@@ -22,13 +22,16 @@ test = [
     "pytest==9.1.1",
     "scipy==1.18.0",
 ]
+video = [
+    "imageio-ffmpeg==0.6.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["env*", "robotics*"]
+include = ["env*", "expert*", "robotics*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
