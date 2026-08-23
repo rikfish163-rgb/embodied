@@ -30,6 +30,26 @@ python scripts/check_foundation.py
 pytest tests -q
 ```
 
+### MuJoCo 原生 3D 窗口
+
+这不是浏览器界面，而是 MuJoCo 自带的 GLFW `Simulate` GUI：
+
+```bash
+source ./env.sh
+MUJOCO_GL=glfw python -m env.native_viewer --seed 0
+```
+
+窗口包含原生左右控制栏、运行/暂停、关节与执行器面板，并支持鼠标旋转、
+平移和缩放视角。需要显示 TCP 与法兰调试 site 时追加 `--debug-sites`：
+
+```bash
+MUJOCO_GL=glfw python -m env.native_viewer --seed 0 --debug-sites
+```
+
+该命令必须在有 `DISPLAY` 或 `WAYLAND_DISPLAY` 的桌面会话中运行；CI 和无窗口
+回归测试继续使用 `MUJOCO_GL=egl`。原生 Viewer 用于人工检查场景与物理交互，
+正式 episode runner 仍必须通过 `PickPlace.step()` 推进并累计成功保持时间。
+
 默认 `pytest` 只运行工程底座测试。`src/robotics/tests/test_so3.py` 是停止执行的
 旧版手写练习，五个函数仍为 `TODO(you)`；它不属于 M0/M1 的通过条件，也没有被
 伪装成已经通过。
@@ -223,7 +243,7 @@ LeRobot 当前硬件指南给 ACT 类轻量 BC 的参考峰值是 batch 8 时约
 
 ```bash
 source ./env.sh
-python -m env.pick_place
+MUJOCO_GL=glfw python -m env.native_viewer --seed 0
 ```
 
 基线命令通过后，下一次工作就是实现并验证 M1；在专家达到 90/100 之前，不创建训练模型、不采 200 条数据，也不继续刷更多课程。
