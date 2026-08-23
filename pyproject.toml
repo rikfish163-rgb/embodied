@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=84"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "panda-reactive-il"
+version = "0.1.0"
+description = "A reproducible MuJoCo Panda manipulation and reactive imitation-learning benchmark."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "imageio==2.37.4",
+    "mujoco==3.11.0",
+    "numpy==2.5.2",
+]
+
+[project.urls]
+Repository = "https://github.com/rikfish163-rgb/embodied"
+
+[dependency-groups]
+test = [
+    "pytest==9.1.1",
+    "scipy==1.18.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["env*", "robotics*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

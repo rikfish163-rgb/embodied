@@ -16,14 +16,16 @@ qpos 布局 (加了 freejoint 后会变, 必须显式记住, 这是最容易错�
     夹爪单指行程 0-0.04m -> 最大开口 8cm, 所以立方体边长取 4cm(半边 0.02) 有余量
     夹爪执行器 actuator8 ctrl 范围 [0, 255]
 """
+
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import mujoco
 import numpy as np
 
-from .scene import TCP_OFFSET_Z, build_spec
+from .scene import build_spec
 
 # --- 几何常量 ---
 TABLE_H = 0.02  # 台面厚度, 顶面 z = TABLE_H
@@ -31,6 +33,8 @@ CUBE_HALF = 0.02  # 立方体半边长 -> 4cm 立方体
 BOX_INNER = 0.06  # 容器内半宽
 BOX_WALL = 0.006  # 容器壁厚
 BOX_H = 0.05  # 容器壁高
+FINGER_OPEN_QPOS = 0.04
+GRIPPER_CTRL_MAX = 255.0
 
 # --- 随机化范围 (这就是"训练分布", eval 的 L1 外推档要落在它之外) ---
 CUBE_X = (0.42, 0.60)
@@ -51,6 +55,9 @@ class TaskConfig:
     img_size: int = 128
     debug_viz: bool = False
     colors: tuple[str, ...] = field(default_factory=lambda: ("red",))
+    control_hz: float = 20.0
+    success_hold_s: float = 1.0
+    success_z_tolerance: float = 0.01
 
 
 def build_task_spec(cfg: TaskConfig) -> mujoco.MjSpec:
@@ -119,13 +126,34 @@ def build_task_spec(cfg: TaskConfig) -> mujoco.MjSpec:
 
 
 class PickPlace:
-    """抓取-放置环境。只提供 reset/step/obs/success, 不含任何策略逻辑。"""
+    """抓取-放置环境，只定义任务契约，不包含专家或学习策略。"""
 
     def __init__(self, cfg: TaskConfig | None = None):
         self.cfg = cfg or TaskConfig()
         self.spec = build_task_spec(self.cfg)
         self.model = self.spec.compile()
         self.data = mujoco.MjData(self.model)
+
+        if self.cfg.control_hz <= 0:
+            raise ValueError("control_hz must be positive")
+        if self.cfg.success_hold_s <= 0:
+            raise ValueError("success_hold_s must be positive")
+        if self.cfg.success_z_tolerance <= 0:
+            raise ValueError("success_z_tolerance must be positive")
+
+        control_period = 1.0 / self.cfg.control_hz
+        self.steps_per_control = round(control_period / self.model.opt.timestep)
+        if not np.isclose(
+            self.steps_per_control * self.model.opt.timestep,
+            control_period,
+            atol=1e-12,
+        ):
+            raise ValueError(
+                "control_hz must map to an integer number of MuJoCo physics steps"
+            )
+        self.required_success_steps = math.ceil(
+            self.cfg.success_hold_s / self.model.opt.timestep
+        )
 
         self.nq_arm = 7
         self.qadr_fingers = 7
@@ -144,8 +172,13 @@ class PickPlace:
         self.bid_cube = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "cube")
         self.bid_box = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "box")
 
+        self.box_inner = BOX_INNER
+        self.box_height = BOX_H
+
         self._renderer: mujoco.Renderer | None = None
         self.home_q = np.array([0.0, 0.35, 0.0, -2.2, 0.0, 2.55, 0.785])
+        self._placement_hold_steps = 0
+        self._success_confirmed = False
 
     def _free_qadr(self, body_name: str) -> int:
         """查某 body 的 freejoint 在 qpos 中的起始地址。"""
@@ -166,7 +199,9 @@ class PickPlace:
 
         mujoco.mj_resetData(self.model, self.data)
         self.data.qpos[: self.nq_arm] = self.home_q
-        self.data.qpos[self.qadr_fingers : self.qadr_fingers + 2] = 0.04  # 张开
+        self.data.qpos[self.qadr_fingers : self.qadr_fingers + 2] = (
+            FINGER_OPEN_QPOS  # 张开
+        )
 
         cx = rng.uniform(*r["cube_x"])
         cy = rng.uniform(*r["cube_y"])
@@ -178,14 +213,17 @@ class PickPlace:
                 dx, dy = rng.uniform(*r["cube_x"]), rng.uniform(*r["cube_y"])
                 if np.hypot(dx - cx, dy - cy) > 4 * CUBE_HALF:
                     break
-            self._set_free(adr, (dx, dy, TABLE_H + CUBE_HALF), rng.uniform(-np.pi, np.pi))
+            self._set_free(
+                adr, (dx, dy, TABLE_H + CUBE_HALF), rng.uniform(-np.pi, np.pi)
+            )
 
         bx, by = rng.uniform(*r["box_x"]), rng.uniform(*r["box_y"])
         self.model.body_pos[self.bid_box] = [bx, by, TABLE_H]
 
         self.data.ctrl[:] = 0.0
         self.data.ctrl[: self.nq_arm] = self.home_q
-        self.data.ctrl[7] = 255.0  # 夹爪张开
+        self.data.ctrl[7] = GRIPPER_CTRL_MAX  # 夹爪张开
+        self._reset_success_tracker()
         mujoco.mj_forward(self.model, self.data)
         return {"cube_xy": (cx, cy), "cube_yaw": yaw, "box_xy": (bx, by)}
 
@@ -202,13 +240,110 @@ class PickPlace:
     def cube_pos(self) -> np.ndarray:
         return self.data.xpos[self.bid_cube].copy()
 
+    @property
+    def gripper_state(self) -> float:
+        """返回 [0, 1] 夹爪开度；0 为闭合，1 为完全张开。"""
+
+        fingers = self.data.qpos[self.qadr_fingers : self.qadr_fingers + 2]
+        return float(np.clip(np.mean(fingers) / FINGER_OPEN_QPOS, 0.0, 1.0))
+
+    def observe(self) -> dict[str, np.ndarray]:
+        """返回策略唯一允许读取的双相机图像与 8 维本体状态。"""
+
+        state = np.concatenate(
+            [self.data.qpos[: self.nq_arm].copy(), [self.gripper_state]]
+        )
+        return {
+            "observation.images.front": self.render("front"),
+            "observation.images.wrist": self.render("wrist"),
+            "observation.state": state,
+        }
+
+    def step(
+        self,
+        action: np.ndarray,
+        *,
+        physics_steps: int | None = None,
+    ) -> dict[str, float | int | bool]:
+        """执行 8 维关节目标动作并更新连续成功判定。
+
+        ``action[:7]`` 是 7 个臂关节的位置目标（弧度）；``action[7]``
+        是归一化夹爪开度，0 为闭合、1 为张开。臂目标会裁剪到执行器范围，
+        非有限值、错误 shape 和越界夹爪命令会直接拒绝。
+        """
+
+        target = np.asarray(action, dtype=float)
+        if target.shape != (8,):
+            raise ValueError(f"action shape must be (8,), got {target.shape}")
+        if not np.all(np.isfinite(target)):
+            raise ValueError("action must contain only finite values")
+        if not 0.0 <= target[7] <= 1.0:
+            raise ValueError("gripper action must be in [0, 1]")
+
+        if physics_steps is None:
+            physics_steps = self.steps_per_control
+        if not isinstance(physics_steps, int) or isinstance(physics_steps, bool):
+            raise TypeError("physics_steps must be a positive integer")
+        if physics_steps <= 0:
+            raise ValueError("physics_steps must be a positive integer")
+
+        arm_limits = self.model.actuator_ctrlrange[: self.nq_arm]
+        self.data.ctrl[: self.nq_arm] = np.clip(
+            target[: self.nq_arm], arm_limits[:, 0], arm_limits[:, 1]
+        )
+        self.data.ctrl[7] = target[7] * GRIPPER_CTRL_MAX
+
+        for _ in range(physics_steps):
+            mujoco.mj_step(self.model, self.data)
+            self._update_success_tracker()
+
+        status = self.placement_status()
+        return {
+            "sim_time": float(self.data.time),
+            "success": self.success(),
+            "placement_ready": status["ready"],
+            "hold_steps": status["hold_steps"],
+        }
+
+    def placement_status(self) -> dict[str, float | int | bool]:
+        """返回当前几何条件和连续保持进度，不推进仿真。"""
+
+        cube = self.cube_pos
+        box = self.model.body_pos[self.bid_box]
+        full_cube_margin = BOX_INNER - CUBE_HALF
+        inside_xy = bool(
+            abs(cube[0] - box[0]) <= full_cube_margin
+            and abs(cube[1] - box[1]) <= full_cube_margin
+        )
+        expected_center_z = box[2] + BOX_WALL + CUBE_HALF
+        height_error = abs(cube[2] - expected_center_z)
+        near_bottom = bool(height_error <= self.cfg.success_z_tolerance)
+        return {
+            "inside_xy": inside_xy,
+            "near_bottom": near_bottom,
+            "ready": inside_xy and near_bottom,
+            "height_error": float(height_error),
+            "hold_steps": self._placement_hold_steps,
+            "required_hold_steps": self.required_success_steps,
+        }
+
+    def _reset_success_tracker(self) -> None:
+        self._placement_hold_steps = 0
+        self._success_confirmed = False
+
+    def _update_success_tracker(self) -> None:
+        if self.placement_status()["ready"]:
+            self._placement_hold_steps += 1
+            self._success_confirmed = (
+                self._placement_hold_steps >= self.required_success_steps
+            )
+            return
+        self._reset_success_tracker()
+
     def success(self) -> bool:
-        """立方体落入容器内且高度低于壁顶 -> 成功。"""
-        c = self.cube_pos
-        b = self.model.body_pos[self.bid_box]
-        inside_xy = abs(c[0] - b[0]) < BOX_INNER and abs(c[1] - b[1]) < BOX_INNER
-        landed = c[2] < TABLE_H + BOX_H
-        return bool(inside_xy and landed)
+        """仅在 cube 完整入盒、接近底部并保持配置时长后返回成功。"""
+
+        return self._success_confirmed
 
     def render(self, camera: str) -> np.ndarray:
         if self._renderer is None:

@@ -1,11 +1,21 @@
-# source 我 —— 每次开工第一件事
-export EMB=/media/hetaisheng/044A81D94A81C83E/embodied
-export UV_CACHE_DIR=$EMB/cache/uv
-export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
-export HF_HOME=$EMB/hf
-export TORCH_HOME=$EMB/cache/torch
+# source 我 —— 每次开工第一件事；不会改变当前工作目录
+_EMB_SOURCE="${BASH_SOURCE[0]}"
+export EMB="$(cd -- "$(dirname -- "$_EMB_SOURCE")" && pwd)"
+unset _EMB_SOURCE
+
+export UV_CACHE_DIR="$EMB/cache/uv"
+export HF_HOME="$EMB/hf"
+export TORCH_HOME="$EMB/cache/torch"
 export MUJOCO_GL=egl
-export MENAGERIE=$EMB/menagerie
-export PYTHONPATH=$EMB/src
-source $EMB/venv/bin/activate
-cd $EMB/src
+export MENAGERIE="$EMB/menagerie"
+export PYTHONPATH="$EMB/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPYCACHEPREFIX="$EMB/cache/pycache"
+
+if [[ -f "$EMB/venv/bin/activate" ]]; then
+    source "$EMB/venv/bin/activate"
+elif [[ -f "$EMB/.venv/bin/activate" ]]; then
+    source "$EMB/.venv/bin/activate"
+else
+    echo "No virtual environment found. Run: uv sync --group test" >&2
+    return 1
+fi

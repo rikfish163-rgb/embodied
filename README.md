@@ -1,69 +1,233 @@
-# Embodied Panda Manipulation Systems Lab
+# Panda Reactive-IL：视觉模仿学习抓放与扰动恢复
 
-这个仓库的目标是完成一条可解释、可测试、可复现的机械臂学习链路：
+> **这是本仓库唯一的项目与唯一执行入口。**
+> 旧版 `DAY1.md`、`PLAN.md` 和七天计划已经停止执行，只保留作历史参考。
+> 今后不按“每天学多少”推进，只按下面的工程门禁推进：上一关没有客观通过，就不进入下一关。
+
+公开仓库：<https://github.com/rikfish163-rgb/embodied>
+
+## 当前阶段与快速验证
+
+当前只完成 **M0 工程底座**：Panda 场景、确定性随机化、双相机观测、
+8 维动作接口、连续 1 秒成功判定、环境回归测试和 CI。M1 脚本专家尚未实现，
+因此仓库不会声称已经完成抓放任务。
+
+干净环境使用 Python 3.12 和 [uv](https://docs.astral.sh/uv/)：
+
+```bash
+git clone https://github.com/rikfish163-rgb/embodied.git
+cd embodied
+uv sync --locked --group test
+MUJOCO_GL=egl uv run python scripts/check_foundation.py
+MUJOCO_GL=egl uv run pytest tests -q
+```
+
+本机已有 `venv/` 或 uv 创建的 `.venv/` 时，也可以：
+
+```bash
+source ./env.sh
+python scripts/check_foundation.py
+pytest tests -q
+```
+
+默认 `pytest` 只运行工程底座测试。`src/robotics/tests/test_so3.py` 是停止执行的
+旧版手写练习，五个函数仍为 `TODO(you)`；它不属于 M0/M1 的通过条件，也没有被
+伪装成已经通过。
+
+`uv.lock` 是公开仓库 M0 底座的最小、跨机器安装契约；
+`requirements.lock.txt` 是本机包含 CUDA/PyTorch 的完整环境快照。CI 只安装前者，
+避免为了验证 MuJoCo 场景下载整套训练栈。
+
+## 一句话目标
+
+在 MuJoCo 中让 Franka Panda 仅根据 **前视 RGB + 腕部 RGB + 关节状态**，学习把随机位置的立方体抓起并放入随机位置的盒子；比较单步行为克隆与 action-chunk 策略，并定量评测新位置泛化、3 cm 中途扰动恢复和推理延迟。
 
 ```text
-SO(3)/SE(3) → FK/Jacobian/IK → 脚本专家 → 数据契约
-→ BC/Mini-ACT → 闭环扰动评测 → 求职交付物
+脚本专家
+  → 同步的视觉/状态/动作数据集
+  → 单步 BC 基线
+  → ACT/action chunk 策略
+  → IID / OOD / 扰动恢复 / 延迟评测
+  → 演示视频 + 结果表 + 失败分析
 ```
 
-## 从哪里开始
+这不是五个小项目，而是一个从数据到部署评测的完整项目。
 
-| 文档 | 作用 | 发生冲突时的优先级 |
-|---|---|---|
-| [`docs/EMBODIED_ARM_CAREER_7DAY_PLAN_2026.md`](docs/EMBODIED_ARM_CAREER_7DAY_PLAN_2026.md) | 招聘证据、项目选择、七天总路线、后续四周路线 | 只负责回答“为什么做、对准什么岗位” |
-| [`PLAN.md`](PLAN.md) | 技术架构、七天工程门禁、数据与评测协议 | 负责回答“整个项目怎样闭环” |
-| [`DAY1.md`](DAY1.md) | Day 1 分钟级学习、实践、AI Coding、命令和验收 | Day 1 执行细节以此文件为准 |
+## 为什么选它投实习
 
-三份文件不是三套项目。它们描述的是同一个 **Panda Manipulation Systems Lab**，只是粒度不同。不要同时来回执行三份时间表：今天直接执行 `DAY1.md`，完成后再按 `PLAN.md` 进入 Day 2。
+截至 2026-08-23，岗位与官方技术栈的共同要求已经很明确：
 
-`docs/jobs/` 预留给招聘证据快照，目前为空。空目录不构成岗位仍开放的证据；以后每份快照至少记录原始 URL、抓取日期、岗位状态和是否为官方来源，禁止只保存脱离日期的 JD 文本。
+- [宇树当前招聘](https://www.unitree.com/cn/position/)直接要求机器人多模态数据管线、模型训练与集成、低延迟“感知—决策—执行”、异常恢复和完整评测体系；
+- [宇树官方开源页](https://www.unitree.com/cn/mobile/opensource/)与 [unitree_lerobot](https://github.com/unitreerobotics/unitree_lerobot) 已把 LeRobot、ACT/DP、数据转换、训练、仿真/真机评测连成完整流程；
+- [大疆 2027 校招热招方向](https://careers.dji.com/zh-CN/campus/hot-jobs?source=campus_hotjobs)强调视觉、多模态、三维物理世界、数据闭环与算法落地；
+- [千寻智能当前校招实习入口](https://nwd4iy9rd2s.jobs.feishu.cn/campusofSpiritAI)覆盖数据算法、VLA 操作算法、后训练和模型评测等方向。
 
-## 当前真实状态
+因此本项目优先对准：**机器人学习 / VLA 操作 / 具身数据 / 模型评测实习**。它不假装是“大模型预训练项目”，而是证明你能独立闭环数据、策略、控制和评测。
 
-- Day 0 环境和 MuJoCo Panda 场景已经就位；
-- `src/env/scene.py` 能在上游 Panda 模型上注入 TCP、腕部相机和第三人称相机；
-- `src/robotics/so3.py` 仍保留 5 个 `TODO(you)`，24 个测试当前按预期失败；
-- `se3.py`、`kinematics.py` 和后续策略模块仍待你按计划完成；
-- 当前成果是“环境与执行计划已验证”，不是“七天项目已经完成”。
+## 项目边界
 
-## 每次开工
+### 必须做
 
-```bash
-source /media/hetaisheng/044A81D94A81C83E/embodied/env.sh
-export PYTHONPYCACHEPREFIX="$EMB/cache/pycache"
-test -f "$MENAGERIE/franka_emika_panda/scene.xml"
-python -m env.scene
-```
+- 单臂 Panda top-down pick-and-place；
+- 训练时随机化 cube 和 box 位置，训练/验证/测试 seed 严格分开；
+- 视觉策略只能看两路 RGB 与 Panda 本体状态；
+- 对比单步 BC 与 action chunk；
+- 固定扰动时机，把 cube 横移 3 cm，测恢复率；
+- 报告成功率、Wilson 95% 区间、p95 推理延迟和失败类型。
 
-`env.sh` 会切换到 `$EMB/src`，并把 uv、Hugging Face、Torch 缓存留在数据盘；上面的 `PYTHONPYCACHEPREFIX` 另外迁移 Python 字节码缓存。系统盘当前接近满载，不要在本周临时安装 Isaac Lab、ROS 2 或其他大型仿真栈。
+### 暂时不做
 
-## 第三方模型：MuJoCo Menagerie
+- 不把完整 SO(3)/SE(3) 手写实现当作开工前置；
+- 不上 ROS 2、Isaac Lab、强化学习或真机；
+- 不训练 SmolVLA、π0/π0.5 等超出 8 GB 显存的模型；
+- 不给单一固定任务硬塞一条恒定文本并称为 VLA。
 
-`menagerie/` 不是本项目原创代码，而是从 [Google DeepMind MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) 固定 revision 提取的 Panda 第三方快照。它现在由**外层主仓库直接管理**，目录内不再保留第二个 `.git`：
+如果主项目全部通过，再加“三种颜色 + 两种任务 + 自然语言指令”。在此之前，恒定语言输入没有信息量，只是简历包装。
 
-| 项 | 当前锁定值 |
+## 固定任务协议
+
+### 策略可见输入
+
+| 键 | 内容 |
 |---|---|
-| 上游 | `https://github.com/google-deepmind/mujoco_menagerie` |
-| revision | `da76818e269b82289eba39808e2fb91d679d6994` |
-| vendored path | `franka_emika_panda` |
-| Panda 模型许可 | Apache-2.0，见 `menagerie/franka_emika_panda/LICENSE` |
-| 版本锁定文件 | `menagerie/VENDORED_REVISION` |
-| Git 管理 | 随主仓库一起 clone、审查和提交 |
+| `observation.images.front` | 128×128 RGB 前视图 |
+| `observation.images.wrist` | 128×128 RGB 腕部视图 |
+| `observation.state` | 7 维臂关节角 + 1 维夹爪状态 |
 
-本项目不直接修改上游 XML 或 mesh。自定义 TCP 和相机由 `src/env/scene.py` 通过 `MjSpec` 在内存中注入，从而保持“上游模型”和“本项目场景逻辑”的边界。
+### 策略输出
 
-验证来源文件、许可证和“仓库内只有一个 `.git`”：
+`action` 是 8 维关节目标：7 维臂目标 + 1 维归一化夹爪目标。
+
+- BC-1 每次预测下一步动作；
+- ACT 预测未来 `H` 步动作块；
+- `H_pred` 表示预测长度，`K_exec` 表示重新观察前实际执行多少步；两者不能混为一谈。
+
+### 严格防泄漏
+
+cube/box 真值位置、TCP 真值和随机化参数可以存到 `privileged/*`，供脚本专家与评测使用，但绝不能进入策略输入。训练数据与测试数据按 **episode seed** 切分，不能把同一条轨迹的相邻帧随机拆到两边。
+
+### 成功定义
+
+cube 必须完整进入盒子、落到底部附近，并在物理仿真中连续保持 1 秒，才计成功。
+碰到盒沿、短暂经过盒内、悬在盒壁高度或直接瞬移物体都不算。
+所有 episode runner 必须通过 `PickPlace.step()` 推进物理；直接绕过环境调用
+`mujoco.mj_step()` 不会更新连续保持计数，不能用于正式判分。
+
+## 五个工程门禁
+
+### M1：脚本专家闭环
+
+做什么：用 MuJoCo 的 site Jacobian + 阻尼最小二乘控制器完成“上方接近 → 下降 → 合爪 → 抬升 → 移动 → 松爪”。这里使用引擎 Jacobian，不先手写整套运动学。
+
+通过条件：
+
+- 100 个固定但未手调的随机 seed 中成功不少于 90 次；
+- 每次成功均由物理接触产生，不修改 cube 位姿作弊；
+- 输出逐 episode 的 seed、成功/失败、失败阶段和轨迹视频；
+- 你能画出 `末端误差 → Jacobian → 关节增量 → actuator target` 控制链。
+
+### M2：可审计数据集
+
+做什么：先采集 200 条成功训练轨迹和 40 条验证轨迹，20 Hz、双相机、HDF5 流式写盘；随后提供到 LeRobotDataset 键名的转换器。测试 episode 不提前写入训练数据，而是在评测时用独立 seed 生成。
+
+通过条件：
+
+- schema、dtype、shape、时间戳、动作范围、episode 边界检查为 0 错误；
+- 随机回放 20 条专家动作，至少 18 条仍成功；
+- 任取一个时刻，都能回答“这一帧观测对应哪一步动作”；
+- 数据报告包含成功率、长度分布、动作分布和人工查看的 20 条失败/异常记录。
+
+### M3：先做小基线，再做 ACT
+
+做什么：
+
+1. `BC-1`：共享 ResNet-18 编码两路图像，拼接 proprioception，MLP 输出下一步动作；
+2. `ACT`：相同输入和数据，输出动作块；优先对接官方 LeRobot ACT，不为了“从零”重写成熟框架；
+3. 正式训练前，先让模型过拟合 8 条轨迹，证明数据和 loss 链路正确。
+
+通过条件：
+
+- 8 条轨迹的训练 loss 相对初始值下降至少 95%，闭环回放至少成功 7/8；
+- 从未见过的 100 个 IID seed 上，至少一个学习策略成功率达到 60%；
+- checkpoint、配置、Git commit、数据版本和随机 seed 全部可追溯；
+- 不能拿离线 action loss 代替闭环成功率。
+
+### M4：2026 风格的反应性评测
+
+固定同一 ACT checkpoint，只改变 `K_exec ∈ {1, 4, 8, 16}`。在抓取前的固定阶段把 cube 横移 3 cm，观察执行块越长时策略何时失去反应能力。主实验不得同时修改网络、数据或 checkpoint。
+
+每个设置至少跑 50 个 trial，输出：
+
+- IID 成功率；
+- OOD 位置成功率；
+- 扰动后的恢复率；
+- Wilson 95% 置信区间；
+- p50/p95 推理延迟与动作平滑度；
+- `未对准 / 抓空 / 滑落 / 碰盒 / 超时` 失败分类。
+
+项目最低通过线：M1、M2 全通过，学习策略 IID ≥ 60%，所有评测格子都有可复现的原始记录。优秀作品目标是 IID ≥ 80%、OOD ≥ 60%、扰动恢复 ≥ 50%，并用 3 个训练 seed 报告均值与波动。ACT 是否胜过 BC 必须由实验决定，不能预写结论。
+
+### M5：求职交付
+
+- 90–120 秒视频：正常成功、3 cm 扰动恢复、一个典型失败；
+- 一张方法图：观测 → 编码器 → action chunk → 闭环执行；
+- 一张主结果表和一张 `K_exec—恢复率` 曲线；
+- 一页失败分析：最常见的三类失败、证据和下一步；
+- 简历一句话必须包含任务、数据量、基线、评测次数和真实数字。
+
+## 只学这五组材料
+
+学习不是按视频数量验收。每看一组，必须立刻产出右栏结果，否则停止继续看。
+
+| 顺序 | 精华材料 | 只学什么 | 学完的判分方式 |
+|---|---|---|---|
+| 1 | Northwestern Modern Robotics：[齐次变换](https://www.youtube.com/watch?v=vlb3P7arbkU)、[Space Jacobian](https://www.youtube.com/watch?v=KbI8HN3imtQ)、[数值 IK 1](https://www.youtube.com/watch?v=VhUA0jf7tI8)、[数值 IK 2](https://www.youtube.com/watch?v=24cXvgQl-nk) | 坐标变换、Jacobian 把末端速度映射到关节速度、迭代 IK；总计约 22 分钟 | 不看资料画出 M1 控制链，并解释为什么奇异位形要加阻尼 |
+| 2 | Sergey Levine 的 [Berkeley CS185/285 2026](https://rail.eecs.berkeley.edu/deeprlcourse/)：只看 Lecture 2、3；视频用 [2023 官方播放列表](https://www.youtube.com/playlist?list=PL_iWQOsE6TfVYGEGiAOMaOzzv41Jfm_Ps) 对应课次 | Behavior cloning、分布偏移、恢复数据、为什么离线 loss 不等于闭环成功 | 用自己的项目举例说明一个动作误差如何把后续观测带出训练分布 |
+| 3 | PyTorch 官方 [Training with PyTorch](https://www.youtube.com/watch?v=jF43_wj_DCQ) | `Dataset/DataLoader`、train/eval、loss、optimizer、checkpoint | 独立读懂并讲清 8-episode overfit 的每一行日志 |
+| 4 | Tony Zhao / Chelsea Finn 等人的 [ALOHA + ACT 官方项目页](https://tonyzhaozh.github.io/aloha/) 与 Hugging Face [LeRobot ACT 官方教程](https://www.youtube.com/watch?v=ft73x0LfGpM) | ACT 输入输出、action chunk、CVAE style、预测长度与执行长度 | 画出本项目 ACT 图，并回答 `H_pred=16, K_exec=4` 实际意味着什么 |
+| 5 | Hugging Face [LeRobotDataset v3 文档](https://huggingface.co/docs/lerobot/main/en/lerobot-dataset-v3) 与 [宇树 unitree_lerobot](https://github.com/unitreerobotics/unitree_lerobot) | 多相机视频、state/action/timestamp、episode metadata、转换/回放/训练接口 | 把本项目每个 HDF5 键一一映射到 LeRobot 键，并解释时间对齐 |
+
+加分材料只在 M4 之后看：[LeRobot Real-Time Chunking](https://huggingface.co/docs/lerobot/main/en/rtc)。它主要针对高延迟 flow-matching VLA，不直接套到 ACT；我们只借它理解“平滑、推理延迟与反应性”的权衡。
+
+## 你和 Codex 的分工
+
+Codex 可以写大量代码。判断标准不是“每一行是否手敲”，而是关键决策是否由你做出、你是否审过 diff、跑过验证并能解释。
+
+| 必须由你负责 | 可以交给 Codex |
+|---|---|
+| 定义成功、失败与作弊边界 | MuJoCo 环境封装、CLI 和重复样板 |
+| 决定 observation/action/schema 与时间对齐 | HDF5 writer、LeRobot adapter、可视化工具 |
+| 划分 seed，人工看数据并删除坏轨迹 | 单元测试、数据校验器、批量运行脚本 |
+| 决定唯一变化的实验变量 | PyTorch 训练脚手架、checkpoint 管理 |
+| 亲自看 rollout、分类失败、解释数字 | 画图、汇总原始结果、润色 README |
+| 面试时从白板讲完整链路 | 扮演面试官追问、检查你的解释漏洞 |
+
+每次让 Codex 改代码前，你先说清三件事：输入输出、通过条件、哪些信息禁止使用。每次改完，你必须看 `git diff`、跑最小测试，并用自己的话复述为什么通过。
+
+## 本机适配
+
+2026-08-23 实测：RTX 5070 Laptop 8151 MiB、30 GiB RAM、MuJoCo 3.11、PyTorch 2.13 CUDA 可用；数据盘尚余约 38 GiB，系统盘约 4.6 GiB。当前 venv 已有 MuJoCo、PyTorch、torchvision、h5py，尚未安装 LeRobot。
+
+- 图像固定 128×128，双相机；
+- ACT 从 `batch_size=4`、bf16 AMP、`num_workers=2` 开始；
+- HDF5 流式读取，禁止把整套图像载入 RAM；
+- 所有缓存和数据继续放 `$EMB/cache`、`$EMB/hf`、`$EMB/results`；
+- 先用现有依赖跑通 BC，再评估并固定 LeRobot 版本，避免现在扩张依赖；
+- 不在系统盘创建新 Conda 环境，不安装 Isaac Lab 或大 VLA。
+
+LeRobot 当前硬件指南给 ACT 类轻量 BC 的参考峰值是 batch 8 时约 2–6 GB，因此本机 8 GB 显存适合 ACT；SmolVLA 的参考是 10–16 GB，大型 VLA 是 24–40 GB，不适合作为本项目主线。
+
+## 现在只做什么
+
+当前只进入 **M1 脚本专家**。`src/robotics/so3.py` 暂时冻结，不要求先完成；现有 Panda、工作台、cube、box 和双相机场景全部复用。
 
 ```bash
-test -f menagerie/franka_emika_panda/scene.xml
-test -f menagerie/franka_emika_panda/LICENSE
-grep '^revision=' menagerie/VENDORED_REVISION
-find . -type d -name .git -print -prune
+source ./env.sh
+python -m env.pick_place
 ```
 
-最后一条预期只输出仓库根目录的 `./.git`。新 clone 会直接包含模型，不需要第二次 clone。若以后升级 Menagerie，必须在临时目录检出新 revision，审查 Panda XML/mesh 差异，更新 `VENDORED_REVISION`，再重跑 FK、碰撞和控制基线；不能在七天实验中静默替换模型。
+基线命令通过后，下一次工作就是实现并验证 M1；在专家达到 90/100 之前，不创建训练模型、不采 200 条数据，也不继续刷更多课程。
 
-## AI 使用边界
+## 第三方模型边界
 
-你必须亲手完成机器人学公式、坐标约定、FK/Jacobian/IK 核心循环、数据时序、评测协议与失败解释。AI 可以帮助查 API、生成非核心脚手架、设计反例、解释单个报错和整理报告。完整边界及可复制提示词见 `DAY1.md`。
+`menagerie/` 是 Google DeepMind MuJoCo Menagerie 的 Panda 快照，由外层 `embodied` 仓库直接管理，没有第二个 `.git`。来源和固定 revision 见 `menagerie/VENDORED_REVISION`；不直接修改上游 XML/mesh，自定义 TCP、相机与任务场景都在 `src/env/` 中程序化注入。

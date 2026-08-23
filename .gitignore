@@ -1,4 +1,5 @@
 venv/
+.venv/
 cache/
 hf/
 runs/
@@ -11,3 +12,16 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .omx/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pt
+*.pth
+*.ckpt
