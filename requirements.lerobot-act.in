@@ -1,0 +1,11 @@
+# SECURITY BLOCKED: do not install this LeRobot v0.6.1 candidate. Its upstream
+# constraints exclude the available security-fixed datasets/setuptools/torch
+# versions. `scripts/bootstrap_lerobot_act.sh` audits and exits before sync.
+lerobot[training] @ git+https://github.com/huggingface/lerobot.git@7e241bd630a3719a56157a497ce5d08f244784f1
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+numpy==2.2.6
+h5py==3.16.0
+mujoco==3.11.0
+imageio==2.37.4
+safetensors==0.8.0

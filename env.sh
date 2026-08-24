@@ -8,14 +8,12 @@ export HF_HOME="$EMB/hf"
 export TORCH_HOME="$EMB/cache/torch"
 export MUJOCO_GL=egl
 export MENAGERIE="$EMB/menagerie"
-export PYTHONPATH="$EMB/src${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPYCACHEPREFIX="$EMB/cache/pycache"
+unset PYTHONPATH
 
-if [[ -f "$EMB/venv/bin/activate" ]]; then
-    source "$EMB/venv/bin/activate"
-elif [[ -f "$EMB/.venv/bin/activate" ]]; then
+if [[ -f "$EMB/.venv/bin/activate" ]]; then
     source "$EMB/.venv/bin/activate"
 else
-    echo "No virtual environment found. Run: uv sync --group test" >&2
+    echo "No locked uv environment found. Run: uv sync --locked --group test" >&2
     return 1
 fi

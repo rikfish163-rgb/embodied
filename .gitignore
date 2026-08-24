@@ -1,10 +1,14 @@
 venv/
 .venv/
+.venv-lerobot/
 cache/
 hf/
 runs/
-data/*.hdf5
-data/*.h5
+/data/**/*.hdf5
+/data/**/*.h5
+/data/**/*.partial
+/data/**/*.partial-*
+/data/**/.*.partial-*
 figs/*.png
 figs/*.mp4
 results/*.jsonl

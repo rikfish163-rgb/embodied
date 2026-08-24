@@ -8,24 +8,25 @@
 
 ## 当前阶段与快速验证
 
-当前已通过 **M0 工程底座** 和 **M1 脚本专家**：Panda 场景、确定性随机化、
-双相机观测、8 维动作接口、连续 1 秒成功判定，以及基于 6D DLS IK 的物理抓放
-状态机。固定 seed 0–99 的验收结果为 99/100；M2 数据集尚未开始，因此仓库不会
-声称已经完成模仿学习或 ACT。
+当前已通过 **M0 工程底座**。M1 脚本专家的控制链和历史运行已经完成，但旧的
+seed 0–99、99/100 与 100 个 MP4 绑定的是后来被修正的“中心点近似入盒”谓词，
+不能当作严格旋转角点判定下的当前正式验收证据；新的 no-clobber 全视频 canonical
+运行仍待生成。M2 的单 episode HDF5 契约、writer、reader 与 validator 已实现，
+但 200+40 正式采集和完整门禁尚未完成，因此仓库不会声称已经完成模仿学习或 ACT。
 
 干净环境使用 Python 3.12 和 [uv](https://docs.astral.sh/uv/)：
 
 ```bash
 git clone https://github.com/rikfish163-rgb/embodied.git
 cd embodied
-uv sync --locked --group test --group video
-MUJOCO_GL=egl uv run python scripts/check_foundation.py
-MUJOCO_GL=egl uv run pytest tests -q
-MUJOCO_GL=egl uv run python -m expert.evaluate \
+env -u PYTHONPATH uv sync --locked --group test --group video
+env -u PYTHONPATH MUJOCO_GL=egl uv run --locked python scripts/check_foundation.py
+env -u PYTHONPATH MUJOCO_GL=egl uv run --locked pytest tests -q
+env -u PYTHONPATH MUJOCO_GL=egl uv run --locked python -m expert.evaluate \
   --output-dir runs/m1/acceptance-001 --record failures
 ```
 
-本机已有 `venv/` 或 uv 创建的 `.venv/` 时，也可以：
+本机已有由 `uv sync --locked` 创建的 `.venv/` 时，也可以：
 
 ```bash
 source ./env.sh
@@ -53,14 +54,26 @@ MUJOCO_GL=glfw python -m env.native_viewer --seed 0 --debug-sites
 回归测试继续使用 `MUJOCO_GL=egl`。原生 Viewer 用于人工检查场景与物理交互，
 正式 episode runner 仍必须通过 `PickPlace.step()` 推进并累计成功保持时间。
 
-默认 `pytest` 只运行工程底座测试。`src/robotics/tests/test_so3.py` 是停止执行的
-旧版手写练习，五个函数仍为 `TODO(you)`；它不属于 M0/M1 的通过条件，也没有被
-伪装成已经通过。
+默认 `pytest` 运行当前工程的活动回归套件，包含工程底座、M1、M2 数据契约、M4
+评测工具与集成卫生测试。`src/robotics/tests/test_so3.py` 是停止执行的旧版手写练习，
+五个函数仍为 `TODO(you)`；它不属于活动门禁，也没有被伪装成已经通过。
 
 `uv.lock` 是公开仓库的跨机器安装契约；默认依赖仍保持最小，MP4 编码器位于
-独立的 `video` 依赖组。
-`requirements.lock.txt` 是本机包含 CUDA/PyTorch 的完整环境快照。CI 只安装前者，
-避免为了验证 MuJoCo 场景下载整套训练栈。
+独立的 `video` 依赖组，CUDA/PyTorch 位于非默认 `train` 组。常规 CI 不安装 train 组，
+避免为了验证 MuJoCo 场景下载整套训练栈。`requirements.lock.txt` 仅保留旧本机环境快照，
+不参与解析、安装或正式 provenance。
+
+当前交付形态是 **GitHub source checkout + locked editable install**，不是 PyPI/wheel
+发行包：环境默认从 checkout 内的 `menagerie/franka_emika_panda` 读取已审计资产，独立
+wheel 不包含这棵 repo-root 资产树。发布 GitHub release 不得把可构建 wheel 误写成已经
+通过独立安装运行验收；若未来发布 wheel，必须另做资产打包、许可证和隔离安装 smoke。
+
+## 许可证状态
+
+仓库根目前没有项目级 `LICENSE`。公开可见不等于授予复制、修改或再分发许可；
+`menagerie/franka_emika_panda/LICENSE` 只覆盖对应第三方资产，不能当作本项目源码许可。
+在仓库所有者明确选择 Apache-2.0、MIT 或其他许可证之前，本项目只发布可审阅源码候选，
+不创建“可复用正式发行版”tag，也不把第三方 Apache-2.0 外推到项目代码。
 
 ## 一句话目标
 
@@ -143,9 +156,10 @@ cube 必须完整进入盒子、落到底部附近，并在物理仿真中连续
 
 做什么：用 MuJoCo 的 site Jacobian + 阻尼最小二乘控制器完成“上方接近 → 下降 → 合爪 → 抬升 → 移动 → 松爪”。这里使用引擎 Jacobian，不先手写整套运动学。
 
-**状态：已通过。** 2026-08-24 在固定 seed 0–99 上成功 99 次；其中 2 次运输
-滑落由一次物理重抓恢复，唯一失败为 seed 34 的第二次抬升抓取失败。完整结果、
-控制器参数和失败边界见 [M1 专家验收报告](docs/M1_EXPERT_REPORT.md)。
+**状态：历史运行已通过，当前严格谓词的正式证据待重跑。** commit `a97977a` 在
+固定 seed 0–99 上记录过 99/100、2 次物理重抓恢复和 100 个可解码 MP4，但这些
+数字只描述旧的中心点近似成功谓词，不能沿用为当前严格角点谓词的结果。控制器、
+修订边界和新证据要求见 [M1 专家验收报告](docs/M1_EXPERT_REPORT.md)。
 
 控制链不是“调用一个黑盒 IK”：
 
@@ -250,13 +264,24 @@ Codex 可以写大量代码。判断标准不是“每一行是否手敲”，�
 
 ## 本机适配
 
-2026-08-23 实测：RTX 5070 Laptop 8151 MiB、30 GiB RAM、MuJoCo 3.11、PyTorch 2.13 CUDA 可用；数据盘尚余约 38 GiB，系统盘约 4.6 GiB。当前 venv 已有 MuJoCo、PyTorch、torchvision、h5py，尚未安装 LeRobot。
+2026-08-24 实测：RTX 5070 Laptop 8151 MiB、30 GiB RAM。项目 `.venv` 已按
+`uv.lock` 的非默认 `train` group 精确同步 torch 2.13.0+cu130、torchvision
+0.28.0+cu130 与 safetensors 0.8.0；bf16 backward、双视角 ResNet18 和跨进程
+safetensors development smoke 均通过。第一次同步因系统盘瞬时跌破 3 GiB 被安全终止，
+第二次受控同步才完成；当前数据盘约余 31 GiB、系统盘约余 4.2 GiB。
+
+这仍不是 formal 训练准入：候选 source/lock 尚未固定到同一 HEAD，formal verifier 正确
+返回 BLOCKED。`requirements.lock.txt` 只是旧本机快照，不是 resolver source；正式合同是
+`pyproject.toml` + `uv.lock`。LeRobot isolate 因上游依赖安全修复版本与 v0.6.1 约束
+不可满足而保持 `dependency_security` BLOCKED，`.venv-lerobot` 未创建。
 
 - 图像固定 128×128，双相机；
 - ACT 从 `batch_size=4`、bf16 AMP、`num_workers=2` 开始；
 - HDF5 流式读取，禁止把整套图像载入 RAM；
-- 所有缓存和数据继续放 `$EMB/cache`、`$EMB/hf`、`$EMB/results`；
-- 先用现有依赖跑通 BC，再评估并固定 LeRobot 版本，避免现在扩张依赖；
+- 所有缓存和数据继续放 `$EMB/cache`、`$EMB/hf`、`$EMB/runs`；
+- PyTorch/torchvision 已进入独立 `train` group 与 `uv.lock`，并在 `.venv` 通过
+  development CUDA smoke；提交后仍须生成 fixed-HEAD formal receipt 才能训练；
+- LeRobot 继续使用隔离路线，但当前依赖安全门禁阻断，禁止创建或启用该环境；
 - 不在系统盘创建新 Conda 环境，不安装 Isaac Lab 或大 VLA。
 
 LeRobot 当前硬件指南给 ACT 类轻量 BC 的参考峰值是 batch 8 时约 2–6 GB，因此本机 8 GB 显存适合 ACT；SmolVLA 的参考是 10–16 GB，大型 VLA 是 24–40 GB，不适合作为本项目主线。
@@ -273,8 +298,11 @@ MUJOCO_GL=egl python -m expert.evaluate \
   --output-dir runs/m1/acceptance-001 --record failures
 ```
 
-M2 下一步是先冻结 HDF5 schema、时间对齐和 train/val seed，再采集 200 条成功训练
-轨迹与 40 条成功验证轨迹。在回放 20 条至少成功 18 条之前，不创建训练模型。
+M2 单 episode HDF5 schema、时间对齐、train/val seed 契约，以及集合级
+manifest/checksum/split 校验、action-only replay、PENDING 人工审核报告和 LeRobot 0.6.1
+key adapter 都已实现。当前只完成 1-episode EGL smoke；下一步是在 clean fixed HEAD 下正式
+采集 200 条成功训练轨迹与 40 条成功验证轨迹，做 cross-manifest 零错误、冻结 20 条 replay
+至少成功 18 条，并逐条完成人工 verdict。在这些证据完成前，不创建训练模型。
 
 ## 第三方模型边界
 

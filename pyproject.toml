@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=84"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,6 +9,7 @@ description = "A reproducible MuJoCo Panda manipulation and reactive imitation-l
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "h5py==3.16.0",
     "imageio==2.37.4",
     "mujoco==3.11.0",
     "numpy==2.5.2",
@@ -20,10 +21,16 @@ Repository = "https://github.com/rikfish163-rgb/embodied"
 [dependency-groups]
 test = [
     "pytest==9.1.1",
+    "ruff==0.15.10",
     "scipy==1.18.0",
 ]
 video = [
     "imageio-ffmpeg==0.6.0",
+]
+train = [
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    "safetensors==0.8.0",
 ]
 
 [tool.setuptools]
@@ -31,7 +38,17 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["env*", "expert*", "robotics*"]
+include = ["data*", "env*", "evaluation*", "expert*", "policy*", "robotics*"]
+exclude = ["robotics.tests*"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.pytest.ini_options]
 addopts = "-ra"

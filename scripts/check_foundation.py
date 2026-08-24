@@ -4,19 +4,17 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
 os.environ.setdefault("MENAGERIE", str(PROJECT_ROOT / "menagerie"))
 os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYTHONPYCACHEPREFIX", str(PROJECT_ROOT / "cache" / "pycache"))
 
-import mujoco
-import numpy as np
+import mujoco  # noqa: E402 - renderer environment must be configured first
+import numpy as np  # noqa: E402 - renderer environment must be configured first
 
-from env.pick_place import PickPlace
+from env.pick_place import PickPlace  # noqa: E402 - MENAGERIE is resolved on import
 
 
 def main() -> int:

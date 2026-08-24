@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import stat
 import subprocess
 from collections import Counter
 from collections.abc import Sequence
@@ -14,11 +17,49 @@ from typing import Any
 import mujoco
 import numpy as np
 
+from env import scene as env_scene
+from env.asset_provenance import AssetProvenanceError, collect_asset_provenance
 from env.pick_place import PickPlace
 
 from .scripted import EpisodeResult, ExpertConfig, config_dict, run_episode
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+_RUNTIME_INPUT_ROOTS = frozenset({"config", "configs", "menagerie", "scripts", "src"})
+_ROOT_INPUT_FILES = frozenset(
+    {
+        ".python-version",
+        "env.sh",
+        "pyproject.toml",
+        "setup.cfg",
+        "setup.py",
+        "uv.lock",
+    }
+)
+_IGNORED_INPUT_PATHS = (
+    "src",
+    "scripts",
+    "menagerie",
+    "config",
+    "configs",
+    ".python-version",
+    "env.sh",
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "uv.lock",
+    "requirements*.txt",
+    ":(top,glob)*.cfg",
+    ":(top,glob)*.ini",
+    ":(top,glob)*.py",
+    ":(top,glob)*.toml",
+    ":(top,glob)*.yaml",
+    ":(top,glob)*.yml",
+)
+
+
+class VideoDependencyError(RuntimeError):
+    """MP4 recording support is unavailable before a run starts."""
 
 
 def _positive_int(value: str) -> int:
@@ -80,6 +121,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except FileExistsError:
         parser.error(f"output directory already exists: {output_dir}")
+    except AssetProvenanceError as error:
+        parser.error(f"asset provenance check failed: {error}")
+    except VideoDependencyError as error:
+        parser.error(str(error))
 
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if summary["gate"]["passed"] else 1
@@ -95,6 +140,18 @@ def evaluate(
     video_stride: int = 2,
     config: ExpertConfig | None = None,
 ) -> dict[str, Any]:
+    _validate_evaluation_request(
+        seed_start=seed_start,
+        num_seeds=num_seeds,
+        required_successes=required_successes,
+        record=record,
+        video_stride=video_stride,
+    )
+    asset_provenance = collect_asset_provenance(
+        PROJECT_ROOT,
+        runtime_asset_root=env_scene.MENAGERIE,
+    )
+    _require_video_support(record)
     cfg = config or ExpertConfig()
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -174,6 +231,7 @@ def evaluate(
         "generated_at": datetime.now(UTC).isoformat(),
         "mujoco_version": mujoco.__version__,
         "git": _git_state(),
+        "asset_provenance": asset_provenance.summary_dict(),
         "seed_start": seed_start,
         "num_episodes": num_seeds,
         "successes": success_count,
@@ -194,6 +252,36 @@ def evaluate(
         json.dump(summary, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
     return summary
+
+
+def _validate_evaluation_request(
+    *,
+    seed_start: int,
+    num_seeds: int,
+    required_successes: int,
+    record: str,
+    video_stride: int,
+) -> None:
+    for name, value in (
+        ("seed_start", seed_start),
+        ("num_seeds", num_seeds),
+        ("required_successes", required_successes),
+        ("video_stride", video_stride),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+    if seed_start < 0:
+        raise ValueError("seed_start must be non-negative")
+    if num_seeds <= 0:
+        raise ValueError("num_seeds must be positive")
+    if required_successes < 0:
+        raise ValueError("required_successes must be non-negative")
+    if required_successes > num_seeds:
+        raise ValueError("required_successes cannot exceed num_seeds")
+    if record not in {"none", "failures", "all"}:
+        raise ValueError("record must be one of: none, failures, all")
+    if video_stride <= 0:
+        raise ValueError("video_stride must be positive")
 
 
 def _run_with_video(
@@ -233,10 +321,7 @@ class _VideoRecorder:
                 macro_block_size=2,
             )
         except (ImportError, RuntimeError, ValueError) as error:
-            raise RuntimeError(
-                "MP4 recording requires the video dependency group: "
-                "uv sync --group video"
-            ) from error
+            raise VideoDependencyError(_VIDEO_DEPENDENCY_MESSAGE) from error
         self._stride = stride
         self._step_index = 0
 
@@ -252,30 +337,221 @@ class _VideoRecorder:
         self._writer.close()
 
 
+_VIDEO_DEPENDENCY_MESSAGE = (
+    "MP4 recording requires the video dependency group: uv sync --locked --group video"
+)
+
+
+def _require_video_support(record: str) -> None:
+    """Resolve the packaged FFmpeg binary before creating run artifacts."""
+
+    if record == "none":
+        return
+    try:
+        import imageio.v2  # noqa: F401
+        import imageio_ffmpeg
+
+        version = imageio_ffmpeg.get_ffmpeg_version()
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        raise VideoDependencyError(_VIDEO_DEPENDENCY_MESSAGE) from error
+    if not isinstance(version, str) or not version.strip():
+        raise VideoDependencyError(_VIDEO_DEPENDENCY_MESSAGE)
+
+
 def _default_output_dir() -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return PROJECT_ROOT / "runs" / "m1" / timestamp
 
 
-def _git_state() -> dict[str, Any]:
+def _git_state(project_root: Path = PROJECT_ROOT) -> dict[str, Any]:
+    project_root = project_root.resolve()
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
+        cwd=project_root,
         check=False,
         capture_output=True,
-        text=True,
     )
-    status = subprocess.run(
+    tracked_status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=no"],
-        cwd=PROJECT_ROOT,
+        cwd=project_root,
         check=False,
         capture_output=True,
-        text=True,
+    )
+    worktree_status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+    )
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+    )
+    ignored_inputs = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            *_IGNORED_INPUT_PATHS,
+        ],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+    )
+
+    untracked_paths = _git_paths(untracked.stdout) if untracked.returncode == 0 else []
+    relevant_paths = {
+        (path, "untracked") for path in untracked_paths if _is_runtime_input(path)
+    }
+    if ignored_inputs.returncode == 0:
+        relevant_paths.update(
+            (path, "ignored")
+            for path in _git_paths(ignored_inputs.stdout)
+            if _is_runtime_input(path)
+        )
+
+    relevant_files: list[dict[str, Any]] = []
+    fingerprints_complete = True
+    for path, git_status in sorted(relevant_paths):
+        fingerprint, complete = _fingerprint_file(
+            project_root,
+            path=path,
+            git_status=git_status,
+        )
+        relevant_files.append(fingerprint)
+        fingerprints_complete &= complete
+
+    commands_complete = all(
+        result.returncode == 0
+        for result in (
+            commit,
+            tracked_status,
+            worktree_status,
+            untracked,
+            ignored_inputs,
+        )
+    )
+    provenance_complete = commands_complete and fingerprints_complete
+    tracked_worktree_clean = (
+        tracked_status.returncode == 0 and not tracked_status.stdout.strip()
     )
     return {
-        "commit": commit.stdout.strip() if commit.returncode == 0 else None,
-        "tracked_worktree_clean": status.returncode == 0 and not status.stdout.strip(),
+        "commit": commit.stdout.decode("ascii").strip()
+        if commit.returncode == 0
+        else None,
+        # Historical M1 summaries define this as tracked files only. Keep that
+        # meaning stable; use the new fields below for fail-closed provenance.
+        "tracked_worktree_clean": tracked_worktree_clean,
+        "worktree_clean": worktree_status.returncode == 0
+        and not worktree_status.stdout,
+        "source_provenance_clean": provenance_complete
+        and tracked_worktree_clean
+        and not relevant_files,
+        "provenance_complete": provenance_complete,
+        "worktree_status_sha256": _output_sha256(worktree_status),
+        "untracked_file_count": len(untracked_paths)
+        if untracked.returncode == 0
+        else None,
+        "untracked_paths_sha256": _output_sha256(untracked),
+        "relevant_untracked_files": relevant_files,
     }
+
+
+def _git_paths(output: bytes) -> list[str]:
+    return [os.fsdecode(path) for path in output.split(b"\0") if path]
+
+
+def _is_runtime_input(path: str) -> bool:
+    parts = Path(path).parts
+    if not parts:
+        return False
+    if any(
+        part == "__pycache__" or part.endswith((".dist-info", ".egg-info"))
+        for part in parts
+    ):
+        return False
+    if parts[0] in _RUNTIME_INPUT_ROOTS:
+        return True
+    if len(parts) != 1:
+        return False
+    name = parts[0]
+    return (
+        name in _ROOT_INPUT_FILES
+        or name.startswith("requirements")
+        and name.endswith(".txt")
+        or Path(name).suffix in {".cfg", ".ini", ".py", ".toml", ".yaml", ".yml"}
+    )
+
+
+def _fingerprint_file(
+    project_root: Path,
+    *,
+    path: str,
+    git_status: str,
+) -> tuple[dict[str, Any], bool]:
+    absolute_path = project_root / path
+    try:
+        before = absolute_path.lstat()
+        digest = hashlib.sha256()
+        if stat.S_ISREG(before.st_mode):
+            with absolute_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        elif stat.S_ISLNK(before.st_mode):
+            digest.update(os.fsencode(os.readlink(absolute_path)))
+        else:
+            return _incomplete_fingerprint(path, git_status, before.st_size), False
+        after = absolute_path.lstat()
+    except OSError:
+        return _incomplete_fingerprint(path, git_status, None), False
+
+    stable = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+    ) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+    return (
+        {
+            "git_status": git_status,
+            "path": path,
+            "sha256": digest.hexdigest(),
+            "size_bytes": before.st_size,
+        },
+        stable,
+    )
+
+
+def _incomplete_fingerprint(
+    path: str,
+    git_status: str,
+    size_bytes: int | None,
+) -> dict[str, Any]:
+    return {
+        "git_status": git_status,
+        "path": path,
+        "sha256": None,
+        "size_bytes": size_bytes,
+    }
+
+
+def _output_sha256(result: subprocess.CompletedProcess[bytes]) -> str | None:
+    if result.returncode != 0:
+        return None
+    return hashlib.sha256(result.stdout).hexdigest()
 
 
 if __name__ == "__main__":
