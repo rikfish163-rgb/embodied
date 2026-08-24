@@ -341,7 +341,9 @@ env -u PYTHONPATH MUJOCO_GL=egl uv run --locked python -m data.reporting \
   --output-dir runs/m2/report-smoke --manual-review-count 1 --smoke
 ```
 
-smoke 只证明流水线与真实环境可运行，不能替代 README M2 门禁。正式完成仍要求独立新
-目录内的 `200 train success + 40 validation success`、两个 manifest 零错误且 seed
-disjoint、冻结选择的 replay `>=18/20`、20 条真人 review verdict。当前实现不会自动
-采集这 240 条，也不会把 diagnostic evidence 表述为正式完成。
+smoke 只证明流水线与真实环境可运行，不能替代 README M2 门禁。当前 checkout 已有独立
+fixed-HEAD formal train/validation collection（`200/203` 与 `40/40`）、两个 manifest 的
+零错误/seed-disjoint validation，以及 train-side 冻结 replay `20/20`；这些运行产物均在
+ignored `runs/m2/` 下，不进入 Git。正式完成仍要求跨 split replay linkage 和 20 条真人
+review verdict；report 在人工记录完成前必须保持 `manual_review_complete=false`，不能把
+自动统计或诊断 evidence 表述为正式训练准入。

@@ -304,9 +304,10 @@ MUJOCO_GL=egl python -m expert.evaluate \
 
 M2 单 episode HDF5 schema、时间对齐、train/val seed 契约，以及集合级
 manifest/checksum/split 校验、action-only replay、PENDING 人工审核报告和 LeRobot 0.6.1
-key adapter 都已实现。当前只完成 1-episode EGL smoke；下一步是在 clean fixed HEAD 下正式
-采集 200 条成功训练轨迹与 40 条成功验证轨迹，做 cross-manifest 零错误、冻结 20 条 replay
-至少成功 18 条，并逐条完成人工 verdict。在这些证据完成前，不创建训练模型。
+key adapter 都已实现。当前 fixed-HEAD 运行已产出正式 train `200/203`（3 条失败保留）与
+validation `40/40`，两个 manifest 的 pair validation 无错误；train 冻结 replay 为
+`20/20`，并已与 train manifest 做 SHA linkage。当前 M2 仍为 PENDING：20 条真人 review
+和跨 split 的最终 replay/manual-review artifact 尚未完成。在这些证据完成前，不创建训练模型。
 
 ## 第三方模型边界
 
