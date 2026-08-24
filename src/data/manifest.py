@@ -587,12 +587,31 @@ def fsync_directory(path: Path) -> None:
 
 def compiled_model_fingerprint(env: Any) -> dict[str, Any]:
     model = env.model
+    # ``PickPlace.reset`` intentionally randomizes the static box body's
+    # position in ``model.body_pos`` for every episode.  That is episode
+    # provenance (and is recorded in the reset receipt), not a change to the
+    # compiled scene.  Canonicalize that one runtime placement while saving
+    # the model so formal collection can re-check the same static fingerprint
+    # after an episode has run.
+    dynamic_body_ids: list[int] = []
+    box_id = getattr(env, "bid_box", None)
+    if isinstance(box_id, (int, np.integer)) and 0 <= int(box_id) < int(model.nbody):
+        dynamic_body_ids.append(int(box_id))
+    original_body_positions = {
+        body_id: np.asarray(model.body_pos[body_id], dtype=np.float64).copy()
+        for body_id in dynamic_body_ids
+    }
     try:
+        for body_id in dynamic_body_ids:
+            model.body_pos[body_id] = 0.0
         buffer = np.empty(int(model.nbuffer), dtype=np.uint8)
         mujoco.mj_saveModel(model, buffer=buffer)
         site_names = [model.site(index).name for index in range(model.nsite)]
     except (AttributeError, IndexError, TypeError, ValueError) as error:
         raise ValueError("cannot fingerprint the compiled MuJoCo model") from error
+    finally:
+        for body_id, position in original_body_positions.items():
+            model.body_pos[body_id] = position
     policy_sites: list[dict[str, Any]] = []
     for name in ("flange", "tcp"):
         if site_names.count(name) != 1:

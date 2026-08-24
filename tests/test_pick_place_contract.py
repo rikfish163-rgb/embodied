@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import env.pick_place as pick_place
+from data.manifest import compiled_model_fingerprint
 from env.pick_place import BOX_WALL, CUBE_HALF, PickPlace, TaskConfig
 
 
@@ -53,6 +54,14 @@ def test_reset_and_observation_contract_are_deterministic(env: PickPlace) -> Non
     assert observation["observation.state"].shape == (8,)
     assert np.all(np.isfinite(observation["observation.state"]))
     assert 0.0 <= observation["observation.state"][-1] <= 1.0
+
+
+def test_compiled_model_fingerprint_is_stable_across_reset(env: PickPlace) -> None:
+    before = compiled_model_fingerprint(env)
+
+    env.reset(np.random.default_rng(42))
+
+    assert compiled_model_fingerprint(env) == before
 
 
 def test_reset_without_distractors_preserves_the_seed_zero_rng_sequence(
