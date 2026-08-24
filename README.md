@@ -270,8 +270,11 @@ Codex 可以写大量代码。判断标准不是“每一行是否手敲”，�
 safetensors development smoke 均通过。第一次同步因系统盘瞬时跌破 3 GiB 被安全终止，
 第二次受控同步才完成；当前数据盘约余 31 GiB、系统盘约余 4.2 GiB。
 
-这仍不是 formal 训练准入：候选 source/lock 尚未固定到同一 HEAD，formal verifier 正确
-返回 BLOCKED。`requirements.lock.txt` 只是旧本机快照，不是 resolver source；正式合同是
+候选 source/lock 进入提交 `0063226` 后，fixed-HEAD formal verifier 已通过：receipt 为
+`sha256:e31baea7dc02a965dcf165c534fac275110af1bdd63337d746efcd7deb5cc373`，文件位于
+`runs/m3/project-train-env-formal-20260824-003/formal-project-train-env-receipt.json`。
+这只解除项目训练环境门禁，不代表 BC/ACT-like 网络、数据、checkpoint 或闭环训练已经
+完成。`requirements.lock.txt` 只是旧本机快照，不是 resolver source；正式合同是
 `pyproject.toml` + `uv.lock`。LeRobot isolate 因上游依赖安全修复版本与 v0.6.1 约束
 不可满足而保持 `dependency_security` BLOCKED，`.venv-lerobot` 未创建。
 
@@ -280,7 +283,8 @@ safetensors development smoke 均通过。第一次同步因系统盘瞬时跌�
 - HDF5 流式读取，禁止把整套图像载入 RAM；
 - 所有缓存和数据继续放 `$EMB/cache`、`$EMB/hf`、`$EMB/runs`；
 - PyTorch/torchvision 已进入独立 `train` group 与 `uv.lock`，并在 `.venv` 通过
-  development CUDA smoke；提交后仍须生成 fixed-HEAD formal receipt 才能训练；
+  development CUDA smoke 与 fixed-HEAD formal environment receipt；实际训练仍须等待
+  M2 正式数据及 M3 policy/training artifacts；
 - LeRobot 继续使用隔离路线，但当前依赖安全门禁阻断，禁止创建或启用该环境；
 - 不在系统盘创建新 Conda 环境，不安装 Isaac Lab 或大 VLA。
 

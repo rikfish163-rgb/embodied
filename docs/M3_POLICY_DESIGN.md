@@ -461,10 +461,12 @@ smoke 在 RTX 5070 Laptop / sm_120 上完成 bf16 forward/backward、双视角 R
 与 safetensors 跨进程加载；`policy` 也从 locked editable checkout 导入。第一次同步因系统盘
 瞬时跌破 3 GiB 被终止并留下 `resource_drift` blocked receipt，第二次 superseding 同步才通过。
 
-这些证据仍不等于 formal passed：当前候选 source/lock 尚未固定在同一提交 HEAD，formal
-verifier 因 `formal_source_head_identical=false` 正确返回 BLOCKED。因此不能启动 BC、
-fallback 或 training rollout，也不能把 development receipt 当成训练准入。常规 CI 的
-test/video 命令不安装 train group；训练主机只允许用第 10.1 节冻结的绝对 uv 命令执行
+候选 source/lock 进入提交 `0063226` 后，formal verifier 已在无 `PYTHONPATH`/`VIRTUAL_ENV`
+的新进程中通过全部 source、lock、editable package、空间和真实 CUDA smoke 检查。正式
+receipt id 为 `sha256:e31baea7dc02a965dcf165c534fac275110af1bdd63337d746efcd7deb5cc373`；
+这只证明项目训练环境准入，不证明 BC、fallback、training rollout、checkpoint 或闭环指标
+已经完成。常规 CI 的 test/video 命令不安装 train group；训练主机只允许用第 10.1 节冻结
+的绝对 uv 命令执行
 `uv sync --locked --group test --group video --group train --project "$EMB"
 --python "$EMB/.venv/bin/python"`。
 
@@ -487,8 +489,8 @@ sync 前后的 `pyproject.toml`、`uv.lock` 必须 tracked-clean 且内容 hash 
 以绝对解释器校验 prefix、精确包来源、`uv sync --check`，并在 sm_120 上完成 bf16
 forward/backward 与 safetensors save/new-process load smoke。
 在这些检查形成 atomic `project-train-env-receipt.v1` passed receipt 之前，训练 CLI
-fail closed。当前已实现 dependency group、lock、verifier 和 development smoke，但尚无
-固定 HEAD 下的 formal passed receipt；这条边界不得被“CUDA 已能运行”替代。
+fail closed。当前 fixed-HEAD formal environment receipt 已通过；后续训练仍必须显式消费
+并复核该 receipt，且不得用它替代 M2 数据、policy 实现、checkpoint 与闭环验收证据。
 
 LeRobot 0.6.1 的 NumPy/PyTorch 约束与根项目依赖合同不同，official ACT 仍只能进入
 第 6.3 节 `$EMB/.venv-lerobot` isolate；不得把 LeRobot 直接装入项目 `.venv`。
@@ -2284,8 +2286,8 @@ M3 未来只有同时具备以下原始 artifacts 才能标记完成：
 - 离线 loss、闭环成功和 process/queue 状态分开表述。
 
 截至 2026-08-24 当前候选，项目 train group/lock、editable `policy` 基础包、source
-provenance helper、project verifier 与 development CUDA smoke 已实现并验证；formal project
-receipt 仍等待候选代码进入固定 HEAD。LeRobot isolate 因不可满足的 dependency-security
-gate 保持 BLOCKED，且未创建环境。M2 正式 200+40、训练数据人工审核、BC/ACT-like 网络、
+provenance helper、project verifier、development CUDA smoke 与 fixed-HEAD formal project
+environment receipt 均已实现并验证。LeRobot isolate 因不可满足的 dependency-security gate
+保持 BLOCKED，且未创建环境。M2 正式 200+40、训练数据人工审核、BC/ACT-like 网络、
 checkpoint、overfit、100-IID 与 M4 runner/正式实验均尚未运行，因此 M3 总里程碑仍为
-PENDING，不能由环境 smoke 代替。
+PENDING，不能由环境准入 receipt 代替。
