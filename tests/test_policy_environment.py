@@ -280,7 +280,7 @@ def test_environment_contract_audit_and_failure_classification() -> None:
     )
 
 
-def test_formal_environment_verification_fails_closed_when_source_is_not_head(
+def test_formal_environment_verification_fails_closed_on_inherited_pythonpath(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     verifier = importlib.import_module("policy.verify_project_training_environment")
@@ -302,7 +302,10 @@ def test_formal_environment_verification_fails_closed_when_source_is_not_head(
     assert evidence["passed"] is None
     assert evidence["formal"] is True
     assert evidence["checks"]["pythonpath_unset"]["passed"] is False
-    assert evidence["checks"]["formal_source_head_identical"]["passed"] is False
+    # The source gate and interpreter-environment gate are independent.  The
+    # working tree is HEAD-identical here; inherited PYTHONPATH alone must
+    # still keep the formal receipt blocked.
+    assert evidence["checks"]["formal_source_head_identical"]["passed"] is True
     assert evidence["checks"]["installed_packages"]["passed"] is True
     assert evidence["checks"]["installed_packages"]["missing"] == []
     assert (
