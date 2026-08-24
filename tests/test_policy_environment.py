@@ -306,12 +306,10 @@ def test_formal_environment_verification_fails_closed_on_inherited_pythonpath(
     # working tree is HEAD-identical here; inherited PYTHONPATH alone must
     # still keep the formal receipt blocked.
     assert evidence["checks"]["formal_source_head_identical"]["passed"] is True
-    assert evidence["checks"]["installed_packages"]["passed"] is True
-    assert evidence["checks"]["installed_packages"]["missing"] == []
-    assert (
-        evidence["checks"]["installed_packages"]["packages"]["torch"]["version"]
-        == "2.13.0+cu130"
-    )
+    # The CI foundation job intentionally installs only the test group; the
+    # optional train group is checked by the project-environment lane.  This
+    # regression must therefore assert the contamination gate independently
+    # of whether train-only packages are installed.
 
 
 def test_formal_source_gate_rejects_symlink_and_startup_hook_bypasses(
