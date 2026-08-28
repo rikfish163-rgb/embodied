@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +28,11 @@ from data.collection import (
     reconcile_indeterminate_run,
 )
 from data.hdf5 import EpisodePublicationError, HDF5EpisodeWriter
+from data.gate import (
+    M2GateConfig,
+    create_m2_gate_receipt,
+    validate_m2_gate_receipt,
+)
 from data.lerobot_adapter import (
     LEROBOT_VERSION,
     LeRobotVersionError,
@@ -33,6 +40,24 @@ from data.lerobot_adapter import (
     lerobot_feature_spec,
     map_lerobot_frame,
     require_lerobot_version,
+)
+from data.lineage import (
+    LineageRevalidationConfig,
+    create_lineage_revalidation_receipt,
+    validate_lineage_revalidation_receipt,
+)
+from data.manual_review import (
+    ManualReviewPackConfig,
+    create_manual_review_pack,
+    validate_manual_review_pack,
+)
+from data.review_attestation import (
+    ATTESTATION_NAMESPACE,
+    HumanReviewAttestationConfig,
+    create_human_review_attestation_request,
+    create_reviewer_registry,
+    finalize_human_review_attestation,
+    validate_human_review_attestation,
 )
 from data.manifest import (
     AtomicPublicationError,
@@ -47,10 +72,17 @@ from data.manifest import (
     validate_split_seed,
 )
 from data.replay import (
+    PAIR_SELECTION_ALGORITHM,
+    PairReplayConfig,
     ReplayConfig,
+    ReplayPlanConfig,
     ReplayProvenanceError,
+    create_replay_plan,
+    replay_manifest_pair,
     replay_collection,
     select_replay_entries,
+    validate_pair_replay_summary,
+    validate_replay_plan,
     validate_replay_summary,
 )
 from data.reporting import ReportConfig, generate_collection_report
@@ -897,6 +929,351 @@ def test_replay_selection_is_deterministic_unique_and_exact(tmp_path: Path) -> N
         select_replay_entries(manifest, count=6, selection_seed=0)
 
 
+def test_pair_replay_plan_uses_sha256_rank_and_rebuilds_exact_selection(
+    tmp_path: Path,
+) -> None:
+    train_root, train_manifest = _collect(
+        tmp_path,
+        name="pair-train",
+        split="train",
+        target_successes=4,
+    )
+    validation_root, validation_manifest = _collect(
+        tmp_path,
+        name="pair-validation",
+        split="validation",
+        target_successes=3,
+    )
+    output = tmp_path / "pair-replay"
+
+    plan = create_replay_plan(
+        ReplayPlanConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=output,
+            count=4,
+            smoke=True,
+        ),
+        now_fn=lambda: datetime(2026, 8, 27, 0, 0, tzinfo=UTC),
+    )
+
+    expected: list[tuple[str, str, int, str, str, int, str]] = []
+    for root, manifest in (
+        (train_root, train_manifest),
+        (validation_root, validation_manifest),
+    ):
+        digest = hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest()
+        manifest_id = f"sha256:{digest}"
+        for entry in manifest["eligible_successes"]:
+            rank_payload = {
+                "algorithm": "sha256-rank-v1",
+                "manifest_id": manifest_id,
+                "selection_seed": 20260824,
+                "split": manifest["split"],
+                "seed": entry["seed"],
+                "relative_hdf5_path": entry["path"],
+                "episode_sha256": entry["sha256"],
+            }
+            rank = hashlib.sha256(
+                json.dumps(
+                    rank_payload,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            expected.append(
+                (
+                    rank,
+                    manifest["split"],
+                    entry["seed"],
+                    entry["path"],
+                    entry["sha256"],
+                    entry["num_steps"],
+                    manifest_id,
+                )
+            )
+    expected.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+
+    assert plan["schema_version"] == "m2-replay-plan.v1"
+    assert plan["selection"] == {
+        "algorithm": PAIR_SELECTION_ALGORITHM,
+        "seed": 20260824,
+        "count": 4,
+        "without_replacement": True,
+    }
+    assert plan["candidate_count"] == 7
+    assert [
+        (
+            trial["rank"],
+            trial["split"],
+            trial["seed"],
+            trial["source_relative_path"],
+            trial["source_file_sha256"],
+            trial["source_num_steps"],
+            trial["manifest_id"],
+        )
+        for trial in plan["selected_trials"]
+    ] == expected[:4]
+    assert len({trial["trial_id"] for trial in plan["selected_trials"]}) == 4
+    validation = validate_replay_plan(
+        output / "plan.json",
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert validation.valid, validation.format_errors()
+
+
+def test_pair_replay_plan_is_closed_world_and_formal_requires_200_plus_40(
+    tmp_path: Path,
+) -> None:
+    train_root, _ = _collect(
+        tmp_path,
+        name="small-train",
+        split="train",
+        target_successes=2,
+    )
+    validation_root, _ = _collect(
+        tmp_path,
+        name="small-validation",
+        split="validation",
+        target_successes=2,
+    )
+    formal_output = tmp_path / "invalid-formal-plan"
+    with pytest.raises(ValueError, match="200 train and 40 validation"):
+        create_replay_plan(
+            ReplayPlanConfig(
+                train_manifest_path=train_root / "manifest.json",
+                validation_manifest_path=validation_root / "manifest.json",
+                output_dir=formal_output,
+            )
+        )
+    assert not formal_output.exists()
+
+    smoke_output = tmp_path / "tamper-plan"
+    create_replay_plan(
+        ReplayPlanConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=smoke_output,
+            count=2,
+            smoke=True,
+        )
+    )
+    plan_path = smoke_output / "plan.json"
+    tampered = json.loads(plan_path.read_text(encoding="utf-8"))
+    tampered["selected_trials"][0]["seed"] += 1
+    tampered_path = tmp_path / "tampered-plan.json"
+    _write_manifest(tampered_path, tampered)
+    validation = validate_replay_plan(
+        tampered_path,
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert not validation.valid
+    assert "replay.plan.identity" in _codes(validation)
+
+
+def test_pair_replay_runner_writes_plan_bound_trial_facts_and_valid_summary(
+    tmp_path: Path,
+) -> None:
+    train_root, _ = _collect(
+        tmp_path,
+        name="runner-train",
+        split="train",
+        target_successes=3,
+        lengths={0: 2, 1: 3, 2: 4},
+    )
+    validation_root, _ = _collect(
+        tmp_path,
+        name="runner-validation",
+        split="validation",
+        target_successes=2,
+        lengths={1000: 3, 1001: 2},
+    )
+    replay_root = tmp_path / "paired-runner"
+    plan = create_replay_plan(
+        ReplayPlanConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=replay_root,
+            count=4,
+            smoke=True,
+        )
+    )
+    replay_env = _ReplayEnv()
+
+    summary = replay_manifest_pair(
+        PairReplayConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            replay_dir=replay_root,
+            smoke=True,
+        ),
+        env_factory=lambda: replay_env,
+        git_state_fn=lambda _: _git_state(),
+        asset_provenance_fn=lambda *_args, **_kwargs: _AssetProvenance(),
+        environment_fingerprint_fn=_environment_fingerprint,
+        now_fn=lambda: datetime(2026, 8, 27, 1, 0, tzinfo=UTC),
+    )
+
+    trials = [
+        json.loads(line)
+        for line in (replay_root / "trials.jsonl").read_text().splitlines()
+    ]
+    assert [trial["trial_id"] for trial in trials] == [
+        trial["trial_id"] for trial in plan["selected_trials"]
+    ]
+    assert [trial["seed"] for trial in trials] == replay_env.reset_seeds
+    assert all(trial["schema_version"] == "m2-replay-trial.v1" for trial in trials)
+    assert all(trial["expected_steps"] == trial["executed_steps"] for trial in trials)
+    assert all(trial["success"] is True for trial in trials)
+    for trial in trials:
+        source_root = train_root if trial["split"] == "train" else validation_root
+        with h5py.File(source_root / trial["source_relative_path"], "r") as episode:
+            actions = np.asarray(episode["action"][:], dtype="<f4")
+        assert (
+            trial["action_dataset_sha256"]
+            == hashlib.sha256(np.ascontiguousarray(actions).tobytes()).hexdigest()
+        )
+    assert summary["identity_reconciliation"] == {
+        "planned": 4,
+        "observed": 4,
+        "missing_trial_ids": [],
+        "unexpected_trial_ids": [],
+        "duplicate_trial_ids": [],
+        "complete": True,
+    }
+    assert summary["success_count"] == 4
+    assert summary["gate"]["passed"] is True
+    validation = validate_pair_replay_summary(
+        replay_root / "summary.json",
+        plan_path=replay_root / "plan.json",
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert validation.valid, validation.format_errors()
+
+    tampered_root = tmp_path / "paired-runner-tampered"
+    shutil.copytree(replay_root, tampered_root)
+    tampered_trials = [
+        json.loads(line)
+        for line in (tampered_root / "trials.jsonl").read_text().splitlines()
+    ]
+    tampered_trials[0]["action_dataset_sha256"] = "f" * 64
+    (tampered_root / "trials.jsonl").write_text(
+        "".join(
+            json.dumps(
+                trial,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+            for trial in tampered_trials
+        ),
+        encoding="utf-8",
+    )
+    tampered_summary = json.loads(
+        (tampered_root / "summary.json").read_text(encoding="utf-8")
+    )
+    tampered_summary["trials_sha256"] = hashlib.sha256(
+        (tampered_root / "trials.jsonl").read_bytes()
+    ).hexdigest()
+    summary_identity = {
+        key: tampered_summary[key]
+        for key in sorted(set(tampered_summary) - {"summary_id", "generated_at"})
+    }
+    tampered_summary["summary_id"] = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                summary_identity,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    _write_manifest(tampered_root / "summary.json", tampered_summary)
+    tamper_validation = validate_pair_replay_summary(
+        tampered_root / "summary.json",
+        plan_path=tampered_root / "plan.json",
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert not tamper_validation.valid
+    assert "replay.trials.source" in _codes(tamper_validation)
+
+
+def test_pair_replay_runner_keeps_exception_row_and_never_replaces_trial(
+    tmp_path: Path,
+) -> None:
+    train_root, _ = _collect(
+        tmp_path,
+        name="exception-train",
+        split="train",
+        target_successes=2,
+    )
+    validation_root, _ = _collect(
+        tmp_path,
+        name="exception-validation",
+        split="validation",
+        target_successes=2,
+    )
+    replay_root = tmp_path / "exception-replay"
+    plan = create_replay_plan(
+        ReplayPlanConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=replay_root,
+            count=4,
+            smoke=True,
+        )
+    )
+    exception_seed = plan["selected_trials"][0]["seed"]
+
+    summary = replay_manifest_pair(
+        PairReplayConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            replay_dir=replay_root,
+            smoke=True,
+        ),
+        env_factory=lambda: _ExceptionReplayEnv(exception_seed),
+        git_state_fn=lambda _: _git_state(),
+        asset_provenance_fn=lambda *_args, **_kwargs: _AssetProvenance(),
+        environment_fingerprint_fn=_environment_fingerprint,
+    )
+
+    trials = [
+        json.loads(line)
+        for line in (replay_root / "trials.jsonl").read_text().splitlines()
+    ]
+    assert len(trials) == 4
+    assert [trial["trial_id"] for trial in trials] == [
+        trial["trial_id"] for trial in plan["selected_trials"]
+    ]
+    failed = trials[0]
+    assert failed["seed"] == exception_seed
+    assert failed["success"] is False
+    assert failed["exception_type"] == "RuntimeError"
+    assert failed["executed_steps"] == 0
+    assert summary["success_count"] == 3
+    assert summary["failed_trial_ids"] == [failed["trial_id"]]
+    assert summary["gate"]["passed"] is False
+    validation = validate_pair_replay_summary(
+        replay_root / "summary.json",
+        plan_path=replay_root / "plan.json",
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert validation.valid, validation.format_errors()
+
+
 class _ReplayEnv:
     def __init__(self) -> None:
         self.cfg = TaskConfig()
@@ -922,6 +1299,17 @@ class _ReplayEnv:
 
     def close(self) -> None:
         return None
+
+
+class _ExceptionReplayEnv(_ReplayEnv):
+    def __init__(self, exception_seed: int) -> None:
+        super().__init__()
+        self.exception_seed = exception_seed
+
+    def step(self, action: np.ndarray) -> dict[str, object]:
+        if self.reset_seeds[-1] == self.exception_seed and not self._actions:
+            raise RuntimeError("injected paired replay failure")
+        return super().step(action)
 
 
 def test_replay_resets_the_source_seed_and_steps_each_stored_action_once(
@@ -1254,6 +1642,986 @@ def test_report_aggregates_raw_actions_and_leaves_manual_review_pending(
     for item in pending:
         contact_sheet = report_root / item["contact_sheet"]
         assert contact_sheet.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_pair_manual_review_pack_is_failure_first_and_leaves_judgments_empty(
+    tmp_path: Path,
+) -> None:
+    train_root, _ = _collect(
+        tmp_path,
+        name="review-train",
+        split="train",
+        target_successes=3,
+        outcomes={0: False},
+        lengths={0: 5, 1: 2, 2: 3, 3: 4},
+    )
+    validation_root, _ = _collect(
+        tmp_path,
+        name="review-validation",
+        split="validation",
+        target_successes=2,
+        lengths={1000: 2, 1001: 5},
+    )
+    output = tmp_path / "review-pack"
+
+    pack = create_manual_review_pack(
+        ManualReviewPackConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=output,
+            count=4,
+            smoke=True,
+        ),
+        now_fn=lambda: datetime(2026, 8, 27, 2, 0, tzinfo=UTC),
+    )
+
+    assert pack["schema_version"] == "m2-human-review-pack.v1"
+    assert pack["status"] == "awaiting_human_review"
+    assert pack["candidate_count"] == 6
+    assert len(pack["selected_reviews"]) == 4
+    assert pack["selected_reviews"][0]["seed"] == 0
+    assert pack["selected_reviews"][0]["classification"] == "failure"
+    assert all(
+        review["classification"] == "anomaly" for review in pack["selected_reviews"][1:]
+    )
+    templates = [
+        json.loads(line)
+        for line in (output / "manual-review-template.jsonl").read_text().splitlines()
+    ]
+    assert len(templates) == 4
+    for template, selected in zip(templates, pack["selected_reviews"], strict=True):
+        assert template["schema_version"] == "m2-manual-review-trial.v1"
+        assert template["manual_review_id"] == selected["manual_review_id"]
+        assert template["reviewer_id"] is None
+        assert template["review_started_at_utc"] is None
+        assert template["review_completed_at_utc"] is None
+        assert template["finding"] is None
+        assert template["verdict"] is None
+        media_path = output / template["media"]["path"]
+        assert media_path.is_file()
+        assert (
+            hashlib.sha256(media_path.read_bytes()).hexdigest()
+            == template["media"]["sha256"]
+        )
+    validation = validate_manual_review_pack(
+        output / "review-pack.json",
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert validation.valid, validation.format_errors()
+    assert validation.complete is False
+    assert validation.status == "awaiting_human_review"
+
+    tampered = json.loads(json.dumps(pack))
+    tampered["formal"] = True
+    tampered["selection"]["seed"] = 7
+    tampered["cli_config"]["selection_seed"] = 7
+    tampered["cli_config"]["smoke"] = False
+    tampered_path = output / "tampered-formal-pack.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    tampered_validation = validate_manual_review_pack(
+        tampered_path,
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert any(
+        issue.code == "manual.pack.formal" and issue.location == "/selection/seed"
+        for issue in tampered_validation.errors
+    )
+
+
+def test_formal_manual_review_pack_requires_exact_population_before_output(
+    tmp_path: Path,
+) -> None:
+    train_root, _ = _collect(
+        tmp_path,
+        name="formal-review-train",
+        split="train",
+        target_successes=2,
+    )
+    validation_root, _ = _collect(
+        tmp_path,
+        name="formal-review-validation",
+        split="validation",
+        target_successes=2,
+    )
+    output = tmp_path / "invalid-formal-review"
+
+    with pytest.raises(ValueError, match="200 train and 40 validation"):
+        create_manual_review_pack(
+            ManualReviewPackConfig(
+                train_manifest_path=train_root / "manifest.json",
+                validation_manifest_path=validation_root / "manifest.json",
+                output_dir=output,
+            )
+        )
+    assert not output.exists()
+
+
+def test_human_review_attestation_requires_human_fields_and_valid_ssh_signature(
+    tmp_path: Path,
+) -> None:
+    train_root, _ = _collect(
+        tmp_path,
+        name="attestation-train",
+        split="train",
+        target_successes=3,
+        outcomes={0: False},
+    )
+    validation_root, _ = _collect(
+        tmp_path,
+        name="attestation-validation",
+        split="validation",
+        target_successes=2,
+    )
+    pack_root = tmp_path / "attestation-pack"
+    pack = create_manual_review_pack(
+        ManualReviewPackConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=pack_root,
+            count=4,
+            smoke=True,
+        ),
+        now_fn=lambda: datetime(2026, 8, 27, 1, 30, tzinfo=UTC),
+    )
+
+    key_root = tmp_path / "keys"
+    key_root.mkdir()
+    private_key = key_root / "reviewer_ed25519"
+    subprocess.run(
+        [
+            "/usr/bin/ssh-keygen",
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-C",
+            "m2-test-reviewer",
+            "-f",
+            str(private_key),
+        ],
+        check=True,
+    )
+    reviewer_repo = tmp_path / "reviewer-repo"
+    reviewer_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(reviewer_repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(reviewer_repo), "config", "user.name", "M2 Test"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(reviewer_repo),
+            "config",
+            "user.email",
+            "m2-test@example.invalid",
+        ],
+        check=True,
+    )
+    registry_path = reviewer_repo / "reviewers.json"
+    with pytest.raises(ValueError, match="reviewer_id"):
+        create_reviewer_registry(
+            reviewer_repo / "invalid-reviewers.json",
+            reviewer_id="human-reviewer-1\nattacker",
+            display_name="Human Reviewer",
+            ssh_public_key=private_key.with_suffix(".pub").read_text().strip(),
+            declared_at_utc="2026-08-27T01:00:00+00:00",
+        )
+    assert not (reviewer_repo / "invalid-reviewers.json").exists()
+    registry = create_reviewer_registry(
+        registry_path,
+        reviewer_id="human-reviewer-1",
+        display_name="Human Reviewer",
+        ssh_public_key=private_key.with_suffix(".pub").read_text().strip(),
+        declared_at_utc="2026-08-27T01:00:00+00:00",
+    )
+    subprocess.run(
+        ["git", "-C", str(reviewer_repo), "add", "reviewers.json"],
+        check=True,
+    )
+    commit_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-08-27T01:05:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-08-27T01:05:00+00:00",
+    }
+    subprocess.run(
+        ["git", "-C", str(reviewer_repo), "commit", "-q", "-m", "registry"],
+        check=True,
+        env=commit_env,
+    )
+    registry_commit = subprocess.run(
+        ["git", "-C", str(reviewer_repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    base_config = dict(
+        review_pack_path=pack_root / "review-pack.json",
+        completed_reviews_path=pack_root / "manual-review-template.jsonl",
+        reviewer_registry_path=registry_path,
+        reviewer_repository_root=reviewer_repo,
+        reviewer_registry_commit=registry_commit,
+        reviewer_id="human-reviewer-1",
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+        smoke=True,
+    )
+    unsigned_root = tmp_path / "unsigned-request"
+    with pytest.raises(ValueError, match="human review fields"):
+        create_human_review_attestation_request(
+            HumanReviewAttestationConfig(
+                **base_config,
+                output_dir=unsigned_root,
+            )
+        )
+    assert not unsigned_root.exists()
+
+    completed_path = pack_root / "manual-review-completed.jsonl"
+    completed_rows = []
+    for index, line in enumerate(
+        (pack_root / "manual-review-template.jsonl").read_text().splitlines()
+    ):
+        row = json.loads(line)
+        row["reviewer_id"] = "human-reviewer-1"
+        row["review_started_at_utc"] = f"2026-08-27T02:00:{index:02d}+00:00"
+        row["review_completed_at_utc"] = f"2026-08-27T02:01:{index:02d}+00:00"
+        row["finding"] = f"Human checked review row {index}; source and media agree."
+        row["verdict"] = "consistent"
+        completed_rows.append(row)
+    completed_path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            for row in completed_rows
+        ),
+        encoding="utf-8",
+    )
+    request_root = tmp_path / "signed-request"
+    request = create_human_review_attestation_request(
+        HumanReviewAttestationConfig(
+            **{
+                **base_config,
+                "completed_reviews_path": completed_path,
+            },
+            output_dir=request_root,
+        )
+    )
+    assert request["status"] == "awaiting_signature"
+    assert request["payload"]["review_pack"]["pack_id"] == pack["pack_id"]
+    assert (
+        request["payload"]["reviewer_registry"]["registry_id"]
+        == registry["registry_id"]
+    )
+    signing_message = request_root / "attestation-message.jsonl"
+    wrong_key = key_root / "wrong_ed25519"
+    subprocess.run(
+        [
+            "/usr/bin/ssh-keygen",
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-f",
+            str(wrong_key),
+        ],
+        check=True,
+    )
+    wrong_message = request_root / "wrong-message.jsonl"
+    shutil.copyfile(signing_message, wrong_message)
+    subprocess.run(
+        [
+            "/usr/bin/ssh-keygen",
+            "-Y",
+            "sign",
+            "-f",
+            str(wrong_key),
+            "-n",
+            ATTESTATION_NAMESPACE,
+            str(wrong_message),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    wrong_output = request_root / "wrong-key-attestation.json"
+    with pytest.raises(ValueError, match="signature verification failed"):
+        finalize_human_review_attestation(
+            request_root / "attestation-request.json",
+            signature_path=Path(f"{wrong_message}.sig"),
+            output_path=wrong_output,
+            review_pack_path=pack_root / "review-pack.json",
+            reviewer_registry_path=registry_path,
+            reviewer_repository_root=reviewer_repo,
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+        )
+    assert not wrong_output.exists()
+    subprocess.run(
+        [
+            "/usr/bin/ssh-keygen",
+            "-Y",
+            "sign",
+            "-f",
+            str(private_key),
+            "-n",
+            ATTESTATION_NAMESPACE,
+            str(signing_message),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    signature_path = Path(f"{signing_message}.sig")
+    attestation_path = request_root / "attestation.json"
+    attestation = finalize_human_review_attestation(
+        request_root / "attestation-request.json",
+        signature_path=signature_path,
+        output_path=attestation_path,
+        review_pack_path=pack_root / "review-pack.json",
+        reviewer_registry_path=registry_path,
+        reviewer_repository_root=reviewer_repo,
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert attestation["status"] == "signed"
+    validation = validate_human_review_attestation(
+        attestation_path,
+        review_pack_path=pack_root / "review-pack.json",
+        reviewer_registry_path=registry_path,
+        reviewer_repository_root=reviewer_repo,
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert validation.valid, validation.format_errors()
+    assert validation.complete is True
+    assert validation.formal is False
+    assert validation.status == "signed"
+
+    tampered = json.loads(attestation_path.read_text())
+    tampered["reviews"][0]["finding"] = "Attacker changed the human finding."
+    tampered_path = request_root / "tampered-attestation.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    tampered_validation = validate_human_review_attestation(
+        tampered_path,
+        review_pack_path=pack_root / "review-pack.json",
+        reviewer_registry_path=registry_path,
+        reviewer_repository_root=reviewer_repo,
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert not tampered_validation.valid
+    assert tampered_validation.complete is False
+
+    drifted_registry = json.loads(registry_path.read_text())
+    drifted_registry["reviewers"][0]["display_name"] = "Changed Reviewer"
+    registry_path.write_text(json.dumps(drifted_registry), encoding="utf-8")
+    drift_validation = validate_human_review_attestation(
+        attestation_path,
+        review_pack_path=pack_root / "review-pack.json",
+        reviewer_registry_path=registry_path,
+        reviewer_repository_root=reviewer_repo,
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+    assert not drift_validation.valid
+    assert drift_validation.complete is False
+
+
+def test_lineage_receipt_accepts_only_equal_runtime_and_allowlisted_docs(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "lineage-repo"
+    repository.mkdir()
+    subprocess.run(["/usr/bin/git", "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "config", "user.name", "Lineage"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repository),
+            "config",
+            "user.email",
+            "lineage@example.invalid",
+        ],
+        check=True,
+    )
+    (repository / "src").mkdir()
+    (repository / "docs").mkdir()
+    (repository / "src/runtime.py").write_text("STRICT_PREDICATE = True\n")
+    (repository / "src/writer.py").write_text("SCHEMA_VERSION = 1\n")
+    (repository / "docs/data.md").write_text("old docs\n")
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "add", "src", "docs"],
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "commit", "-q", "-m", "source"],
+        check=True,
+    )
+    accepted_commit = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repository / "docs/data.md").write_text("new docs only\n")
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "add", "docs/data.md"],
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "commit", "-q", "-m", "docs"],
+        check=True,
+    )
+    baseline_commit = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    common = {
+        "schema_version": "m2-collection-manifest.v1",
+        "formal": False,
+        "git": {
+            "commit": accepted_commit,
+            "source_provenance_clean": True,
+            "provenance_complete": True,
+        },
+        "controller": {"damping": 0.025, "max_attempts": 2},
+        "assets": {"aggregate_manifest_sha256": "a" * 64},
+        "environment": {
+            "schema_version": "m2-environment.v1",
+            "mujoco_version": "3.11.0",
+            "task_config": {"success_hold_s": 1.0},
+            "compiled_model": {"fingerprint_sha256": "b" * 64},
+        },
+    }
+    train_manifest = tmp_path / "lineage-train.json"
+    validation_manifest = tmp_path / "lineage-validation.json"
+    train_manifest.write_text(
+        json.dumps({**common, "split": "train", "attempt_count": 2}),
+        encoding="utf-8",
+    )
+    validation_manifest.write_text(
+        json.dumps({**common, "split": "validation", "attempt_count": 1}),
+        encoding="utf-8",
+    )
+    receipt_path = tmp_path / "lineage-revalidation.json"
+    receipt = create_lineage_revalidation_receipt(
+        LineageRevalidationConfig(
+            repository_root=repository,
+            train_manifest_path=train_manifest,
+            validation_manifest_path=validation_manifest,
+            output_path=receipt_path,
+            accepted_commit=accepted_commit,
+            baseline_commit=baseline_commit,
+            runtime_paths=("src/runtime.py", "src/writer.py"),
+            documentation_allowlist=("docs/data.md",),
+            smoke=True,
+        ),
+        now_fn=lambda: datetime(2026, 8, 27, 3, 0, tzinfo=UTC),
+    )
+    assert receipt["schema_version"] == "m1-m2-lineage-revalidation.v1"
+    assert receipt["status"] == "passed"
+    assert receipt["runtime_equality"]["equal"] is True
+    assert receipt["repository_differences"]["changed_paths"] == ["docs/data.md"]
+    report = validate_lineage_revalidation_receipt(
+        receipt_path,
+        repository_root=repository,
+        train_manifest_path=train_manifest,
+        validation_manifest_path=validation_manifest,
+    )
+    assert report.valid, report.format_errors()
+    assert report.passed is True
+    reference = replay_module._validated_lineage_reference(
+        receipt_path,
+        replay_dir=tmp_path,
+        project_root=repository,
+        train_manifest_path=train_manifest,
+        validation_manifest_path=validation_manifest,
+        require_formal=False,
+    )
+    assert reference["provided"] is True
+    assert reference["validated"] is True
+    assert reference["receipt_id"] == receipt["receipt_id"]
+    with pytest.raises(ReplayProvenanceError, match="formal lineage"):
+        replay_module._validated_lineage_reference(
+            receipt_path,
+            replay_dir=tmp_path,
+            project_root=repository,
+            train_manifest_path=train_manifest,
+            validation_manifest_path=validation_manifest,
+            require_formal=True,
+        )
+
+    (repository / "src/runtime.py").write_text("STRICT_PREDICATE = False\n")
+    drifted = validate_lineage_revalidation_receipt(
+        receipt_path,
+        repository_root=repository,
+        train_manifest_path=train_manifest,
+        validation_manifest_path=validation_manifest,
+    )
+    assert not drifted.valid
+    assert drifted.passed is False
+    assert any(issue.code == "lineage.source" for issue in drifted.errors)
+
+
+def test_lineage_receipt_rejects_runtime_change_between_commits(tmp_path: Path) -> None:
+    repository = tmp_path / "lineage-runtime-drift"
+    repository.mkdir()
+    subprocess.run(["/usr/bin/git", "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "config", "user.name", "Lineage"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repository),
+            "config",
+            "user.email",
+            "lineage@example.invalid",
+        ],
+        check=True,
+    )
+    runtime = repository / "runtime.py"
+    runtime.write_text("version = 1\n")
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "add", "runtime.py"],
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "commit", "-q", "-m", "v1"],
+        check=True,
+    )
+    accepted = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    runtime.write_text("version = 2\n")
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "add", "runtime.py"],
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "commit", "-q", "-m", "v2"],
+        check=True,
+    )
+    baseline = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    common = {
+        "schema_version": "m2-collection-manifest.v1",
+        "formal": False,
+        "git": {
+            "commit": accepted,
+            "source_provenance_clean": True,
+            "provenance_complete": True,
+        },
+        "controller": {},
+        "assets": {"aggregate_manifest_sha256": "a" * 64},
+        "environment": {},
+        "attempt_count": 1,
+    }
+    train = tmp_path / "train.json"
+    validation = tmp_path / "validation.json"
+    train.write_text(json.dumps({**common, "split": "train"}), encoding="utf-8")
+    validation.write_text(
+        json.dumps({**common, "split": "validation"}), encoding="utf-8"
+    )
+    output = tmp_path / "must-not-exist.json"
+    with pytest.raises(ValueError, match="runtime source differs"):
+        create_lineage_revalidation_receipt(
+            LineageRevalidationConfig(
+                repository_root=repository,
+                train_manifest_path=train,
+                validation_manifest_path=validation,
+                output_path=output,
+                accepted_commit=accepted,
+                baseline_commit=baseline,
+                runtime_paths=("runtime.py",),
+                documentation_allowlist=(),
+                smoke=True,
+            )
+        )
+    assert not output.exists()
+
+
+def test_m2_gate_cannot_publish_without_signed_human_attestation(
+    tmp_path: Path,
+) -> None:
+    train_root, _ = _collect(
+        tmp_path,
+        name="gate-train",
+        split="train",
+        target_successes=2,
+    )
+    validation_root, _ = _collect(
+        tmp_path,
+        name="gate-validation",
+        split="validation",
+        target_successes=2,
+    )
+    pack_root = tmp_path / "gate-review-pack"
+    create_manual_review_pack(
+        ManualReviewPackConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=pack_root,
+            count=2,
+            smoke=True,
+        )
+    )
+    output = tmp_path / "m2-gate.json"
+    missing = tmp_path / "missing.json"
+    with pytest.raises(ValueError, match="signed human review attestation"):
+        create_m2_gate_receipt(
+            M2GateConfig(
+                project_root=tmp_path,
+                train_manifest_path=train_root / "manifest.json",
+                validation_manifest_path=validation_root / "manifest.json",
+                train_validation_report_path=missing,
+                pair_validation_report_path=missing,
+                train_report_path=missing,
+                validation_report_path=missing,
+                replay_summary_path=missing,
+                review_pack_path=pack_root / "review-pack.json",
+                human_attestation_path=missing,
+                reviewer_registry_path=missing,
+                lineage_receipt_path=missing,
+                output_path=output,
+                smoke=True,
+            )
+        )
+    assert not output.exists()
+
+
+def test_m2_gate_smoke_revalidates_every_bound_artifact(tmp_path: Path) -> None:
+    subprocess.run(["/usr/bin/git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(tmp_path), "config", "user.name", "M2 Gate"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(tmp_path),
+            "config",
+            "user.email",
+            "m2-gate@example.invalid",
+        ],
+        check=True,
+    )
+    key = tmp_path / "reviewer-key"
+    subprocess.run(
+        [
+            "/usr/bin/ssh-keygen",
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-f",
+            str(key),
+        ],
+        check=True,
+    )
+    registry = tmp_path / "reviewers.json"
+    create_reviewer_registry(
+        registry,
+        reviewer_id="m2-gate-reviewer",
+        display_name="M2 Gate Reviewer",
+        ssh_public_key=key.with_suffix(".pub").read_text().strip(),
+        declared_at_utc="2026-08-28T01:00:00+00:00",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "src/runtime.py").write_text("STRICT_PREDICATE = True\n")
+    (tmp_path / "src/writer.py").write_text("SCHEMA_VERSION = 1\n")
+    (tmp_path / "docs/data.md").write_text("v1\n")
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(tmp_path),
+            "add",
+            "reviewers.json",
+            "src/runtime.py",
+            "src/writer.py",
+            "docs/data.md",
+        ],
+        check=True,
+    )
+    accepted_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-08-28T01:05:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-08-28T01:05:00+00:00",
+    }
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(tmp_path), "commit", "-q", "-m", "source"],
+        check=True,
+        env=accepted_env,
+    )
+    accepted = subprocess.run(
+        ["/usr/bin/git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (tmp_path / "docs/data.md").write_text("v2 docs only\n")
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(tmp_path), "add", "docs/data.md"],
+        check=True,
+    )
+    baseline_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-08-28T01:10:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-08-28T01:10:00+00:00",
+    }
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(tmp_path), "commit", "-q", "-m", "docs"],
+        check=True,
+        env=baseline_env,
+    )
+    baseline = subprocess.run(
+        ["/usr/bin/git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    train_root, train_manifest = _collect(
+        tmp_path,
+        name="gate-full-train",
+        split="train",
+        target_successes=2,
+    )
+    validation_root, validation_manifest = _collect(
+        tmp_path,
+        name="gate-full-validation",
+        split="validation",
+        target_successes=2,
+    )
+    for root, manifest in (
+        (train_root, train_manifest),
+        (validation_root, validation_manifest),
+    ):
+        manifest["git"]["commit"] = accepted
+        _write_manifest(root / "manifest.json", manifest)
+
+    train_validation_path = tmp_path / "train-validation.json"
+    pair_validation_path = tmp_path / "pair-validation.json"
+    train_validation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "m2-collection-validation-report.v1",
+                "valid": True,
+                "manifest_paths": [(train_root / "manifest.json").as_posix()],
+                "errors": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair_validation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "m2-collection-validation-report.v1",
+                "valid": True,
+                "manifest_paths": [
+                    (validation_root / "manifest.json").as_posix(),
+                    (train_root / "manifest.json").as_posix(),
+                ],
+                "errors": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    train_report_root = tmp_path / "gate-train-report"
+    validation_report_root = tmp_path / "gate-validation-report"
+    generate_collection_report(
+        ReportConfig(
+            manifest_path=train_root / "manifest.json",
+            output_dir=train_report_root,
+            manual_review_count=2,
+            smoke=True,
+        )
+    )
+    generate_collection_report(
+        ReportConfig(
+            manifest_path=validation_root / "manifest.json",
+            output_dir=validation_report_root,
+            manual_review_count=2,
+            smoke=True,
+        )
+    )
+
+    replay_root = tmp_path / "gate-pair-replay"
+    create_replay_plan(
+        ReplayPlanConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=replay_root,
+            count=2,
+            smoke=True,
+        )
+    )
+    lineage_path = replay_root / "lineage-revalidation.json"
+    create_lineage_revalidation_receipt(
+        LineageRevalidationConfig(
+            repository_root=tmp_path,
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_path=lineage_path,
+            accepted_commit=accepted,
+            baseline_commit=baseline,
+            runtime_paths=("src/runtime.py", "src/writer.py"),
+            documentation_allowlist=("docs/data.md",),
+            smoke=True,
+        )
+    )
+    replay_manifest_pair(
+        PairReplayConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            replay_dir=replay_root,
+            smoke=True,
+            lineage_receipt_path=lineage_path,
+            project_root=tmp_path,
+        ),
+        env_factory=_ReplayEnv,
+        git_state_fn=lambda _: _git_state(),
+        asset_provenance_fn=lambda *_args, **_kwargs: _AssetProvenance(),
+        environment_fingerprint_fn=_environment_fingerprint,
+    )
+
+    pack_root = tmp_path / "gate-full-review-pack"
+    create_manual_review_pack(
+        ManualReviewPackConfig(
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=pack_root,
+            count=2,
+            smoke=True,
+        )
+    )
+    completed = pack_root / "completed.jsonl"
+    completed.write_text(
+        "".join(
+            json.dumps(
+                {
+                    **json.loads(line),
+                    "reviewer_id": "m2-gate-reviewer",
+                    "review_started_at_utc": f"2026-08-28T02:00:{index:02d}+00:00",
+                    "review_completed_at_utc": f"2026-08-28T02:01:{index:02d}+00:00",
+                    "finding": f"Human reviewed row {index}; source and media agree.",
+                    "verdict": "consistent",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+            for index, line in enumerate(
+                (pack_root / "manual-review-template.jsonl").read_text().splitlines()
+            )
+        ),
+        encoding="utf-8",
+    )
+    attestation_root = tmp_path / "gate-attestation"
+    create_human_review_attestation_request(
+        HumanReviewAttestationConfig(
+            review_pack_path=pack_root / "review-pack.json",
+            completed_reviews_path=completed,
+            reviewer_registry_path=registry,
+            reviewer_repository_root=tmp_path,
+            reviewer_registry_commit=accepted,
+            reviewer_id="m2-gate-reviewer",
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            output_dir=attestation_root,
+            smoke=True,
+        )
+    )
+    signing_message = attestation_root / "attestation-message.jsonl"
+    subprocess.run(
+        [
+            "/usr/bin/ssh-keygen",
+            "-Y",
+            "sign",
+            "-f",
+            str(key),
+            "-n",
+            ATTESTATION_NAMESPACE,
+            str(signing_message),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    attestation_path = attestation_root / "attestation.json"
+    finalize_human_review_attestation(
+        attestation_root / "attestation-request.json",
+        signature_path=Path(f"{signing_message}.sig"),
+        output_path=attestation_path,
+        review_pack_path=pack_root / "review-pack.json",
+        reviewer_registry_path=registry,
+        reviewer_repository_root=tmp_path,
+        train_manifest_path=train_root / "manifest.json",
+        validation_manifest_path=validation_root / "manifest.json",
+    )
+
+    gate_path = tmp_path / "m2-gate-smoke.json"
+    gate = create_m2_gate_receipt(
+        M2GateConfig(
+            project_root=tmp_path,
+            train_manifest_path=train_root / "manifest.json",
+            validation_manifest_path=validation_root / "manifest.json",
+            train_validation_report_path=train_validation_path,
+            pair_validation_report_path=pair_validation_path,
+            train_report_path=train_report_root / "report.json",
+            validation_report_path=validation_report_root / "report.json",
+            replay_summary_path=replay_root / "summary.json",
+            review_pack_path=pack_root / "review-pack.json",
+            human_attestation_path=attestation_path,
+            reviewer_registry_path=registry,
+            lineage_receipt_path=lineage_path,
+            output_path=gate_path,
+            smoke=True,
+        )
+    )
+    assert gate["status"] == "passed"
+    assert gate["formal"] is False
+    assert gate["checks"] == {
+        "collection_pair_valid": True,
+        "published_validation_reports_valid": True,
+        "data_reports_recomputed": True,
+        "paired_replay_passed": True,
+        "human_review_signed_complete": True,
+        "lineage_passed": True,
+        "all_input_hashes_stable": True,
+    }
+    gate_validation = validate_m2_gate_receipt(gate_path, project_root=tmp_path)
+    assert gate_validation.valid, gate_validation.format_errors()
+    assert gate_validation.passed is True
+
+    train_report_payload = json.loads((train_report_root / "report.json").read_text())
+    train_report_payload["actions"]["dimensions"][0]["mean"] += 1.0
+    _write_manifest(train_report_root / "report.json", train_report_payload)
+    tampered = validate_m2_gate_receipt(gate_path, project_root=tmp_path)
+    assert not tampered.valid
+    assert tampered.passed is False
 
 
 def test_report_rejects_action_spool_over_budget_before_opening_payloads(

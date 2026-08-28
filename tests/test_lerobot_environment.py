@@ -16,14 +16,18 @@ VERIFIER_PATH = PROJECT_ROOT / "scripts" / "verify_lerobot_environment.py"
 
 
 def _load_verifier():
-    spec = importlib.util.spec_from_file_location("verify_lerobot_environment", VERIFIER_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "verify_lerobot_environment", VERIFIER_PATH
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def test_requirement_input_accepts_only_the_frozen_package_anchors(tmp_path: Path) -> None:
+def test_requirement_input_accepts_only_the_frozen_package_anchors(
+    tmp_path: Path,
+) -> None:
     verifier = _load_verifier()
     requirements = tmp_path / "requirements.lerobot-act.in"
     requirements.write_text(
@@ -159,9 +163,10 @@ def test_cuda_ladder_rejects_skipped_or_repeated_microbatches() -> None:
 def test_repository_requirement_input_matches_the_frozen_contract() -> None:
     verifier = _load_verifier()
 
-    assert verifier.read_requirement_anchors(
-        PROJECT_ROOT / "requirements.lerobot-act.in"
-    ) == verifier.REQUIRED_ANCHORS
+    assert (
+        verifier.read_requirement_anchors(PROJECT_ROOT / "requirements.lerobot-act.in")
+        == verifier.REQUIRED_ANCHORS
+    )
 
 
 def test_isolate_environment_removes_project_activation_and_routes_growth_to_data(
@@ -370,9 +375,7 @@ def test_source_lineage_requires_an_exact_clean_start_to_terminal_recheck() -> N
 
 def test_terminal_decision_cannot_promote_dirty_or_partial_development_smoke() -> None:
     verifier = _load_verifier()
-    clean_lineage = verifier.source_lineage_gate(
-        _source_manifest(), _source_manifest()
-    )
+    clean_lineage = verifier.source_lineage_gate(_source_manifest(), _source_manifest())
     dirty_lineage = verifier.source_lineage_gate(
         _source_manifest(clean=False), _source_manifest(clean=False)
     )
@@ -389,20 +392,26 @@ def test_terminal_decision_cannot_promote_dirty_or_partial_development_smoke() -
         "reason_code": "source_provenance_not_clean",
         "non_acceptance": True,
     }
-    assert verifier.terminal_decision(
-        requested_status="failed",
-        failure_class="non_finite",
-        evidence_complete=False,
-        resource_blocker_code=None,
-        source_lineage=clean_lineage,
-    )["status"] == "blocked"
-    assert verifier.terminal_decision(
-        requested_status="failed",
-        failure_class="mystery",
-        evidence_complete=True,
-        resource_blocker_code=None,
-        source_lineage=clean_lineage,
-    )["status"] == "blocked"
+    assert (
+        verifier.terminal_decision(
+            requested_status="failed",
+            failure_class="non_finite",
+            evidence_complete=False,
+            resource_blocker_code=None,
+            source_lineage=clean_lineage,
+        )["status"]
+        == "blocked"
+    )
+    assert (
+        verifier.terminal_decision(
+            requested_status="failed",
+            failure_class="mystery",
+            evidence_complete=True,
+            resource_blocker_code=None,
+            source_lineage=clean_lineage,
+        )["status"]
+        == "blocked"
+    )
     assert verifier.terminal_decision(
         requested_status="failed",
         failure_class="non_finite",
@@ -552,9 +561,7 @@ def test_policy_exercise_runs_the_complete_train_and_predict_chain() -> None:
             return loss, {"l1_loss": float(loss.detach()), "kld_loss": 0.0}
 
         def predict_action_chunk(self, batch):
-            return self.scale * torch.ones(
-                batch["observation.state"].shape[0], 16, 8
-            )
+            return self.scale * torch.ones(batch["observation.state"].shape[0], 16, 8)
 
     policy = TinyChunkPolicy()
     optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-2)
@@ -792,20 +799,23 @@ def test_bootstrap_launcher_publishes_a_canonical_receipt_on_low_space() -> None
         assert payload["reason_code"] == "insufficient_data_space"
         assert payload["fallback_allowed"] is False
         assert payload["environment"]["creation_attempted"] is False
-        assert subprocess.run(
-            [
-                "/usr/bin/python3.12",
-                str(repository / "src" / "policy" / "canonical_json.py"),
-                "validate-id",
-                "--input",
-                str(receipt),
-                "--identity-field",
-                "receipt_id",
-                "--require-schema",
-                "lerobot-smoke-receipt.v1",
-            ],
-            check=False,
-        ).returncode == 0
+        assert (
+            subprocess.run(
+                [
+                    "/usr/bin/python3.12",
+                    str(repository / "src" / "policy" / "canonical_json.py"),
+                    "validate-id",
+                    "--input",
+                    str(receipt),
+                    "--identity-field",
+                    "receipt_id",
+                    "--require-schema",
+                    "lerobot-smoke-receipt.v1",
+                ],
+                check=False,
+            ).returncode
+            == 0
+        )
 
 
 @pytest.mark.parametrize("mode", ["audit", "sync", "smoke"])
@@ -856,6 +866,7 @@ def test_bootstrap_launcher_publishes_blocked_receipt_before_creating_the_venv(
         # correct outcome and the audit logs are intentionally absent.
         assert payload["reason_code"] in {
             "dependency_security",
+            "insufficient_data_space",
             "insufficient_root_space",
         }
         assert payload["fallback_allowed"] is False
@@ -864,20 +875,23 @@ def test_bootstrap_launcher_publishes_blocked_receipt_before_creating_the_venv(
             assert (run_dir / "dependency-audit.stdout.log").is_file()
             assert (run_dir / "dependency-audit.stderr.log").is_file()
             assert (run_dir / "dependency-audit.logs.sha256").is_file()
-        assert subprocess.run(
-            [
-                "/usr/bin/python3.12",
-                str(repository / "src" / "policy" / "canonical_json.py"),
-                "validate-id",
-                "--input",
-                str(receipt),
-                "--identity-field",
-                "receipt_id",
-                "--require-schema",
-                "lerobot-smoke-receipt.v1",
-            ],
-            check=False,
-        ).returncode == 0
+        assert (
+            subprocess.run(
+                [
+                    "/usr/bin/python3.12",
+                    str(repository / "src" / "policy" / "canonical_json.py"),
+                    "validate-id",
+                    "--input",
+                    str(receipt),
+                    "--identity-field",
+                    "receipt_id",
+                    "--require-schema",
+                    "lerobot-smoke-receipt.v1",
+                ],
+                check=False,
+            ).returncode
+            == 0
+        )
 
         original = receipt.read_bytes()
         repeated = subprocess.run(command, check=False, capture_output=True, text=True)

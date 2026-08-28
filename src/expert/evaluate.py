@@ -49,12 +49,8 @@ _IGNORED_INPUT_PATHS = (
     "setup.py",
     "uv.lock",
     "requirements*.txt",
-    ":(top,glob)*.cfg",
-    ":(top,glob)*.ini",
-    ":(top,glob)*.py",
-    ":(top,glob)*.toml",
-    ":(top,glob)*.yaml",
-    ":(top,glob)*.yml",
+    ":(top)sitecustomize.py",
+    ":(top)usercustomize.py",
 )
 
 
